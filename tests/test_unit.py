@@ -5,12 +5,14 @@ Run with:  pytest tests/test_unit.py -v
 """
 
 import sys
+import tempfile
 from pathlib import Path
 
 # Make sure the repo root is on sys.path when running from any directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scraper.autotrader import build_autotrader_url, Listing
+from scraper.database import ListingDatabase
 from main import apply_defaults
 
 
@@ -153,3 +155,107 @@ class TestListingToDict:
     def test_source_defaults_to_autotrader(self):
         d = self._make_listing().to_dict()
         assert d["source"] == "autotrader"
+
+
+# ---------------------------------------------------------------------------
+# ListingDatabase — email_sent lifecycle
+# ---------------------------------------------------------------------------
+
+class TestListingDatabase:
+    def _db(self):
+        tmp = tempfile.mkdtemp()
+        return ListingDatabase(f"{tmp}/test.db")
+
+    def _listing(self, listing_id="L1", price=18000, **kwargs):
+        return Listing(
+            listing_id=listing_id, title="Kia EV6 2022", price=price,
+            year=2022, mileage=30000, location="Edinburgh", distance_miles=5,
+            seller_type="dealer", seller_name="EV Cars Ltd",
+            spec_summary="Auto | Electric", url="https://example.com",
+            search_name="Test Search",
+        )
+
+    def test_new_listing_has_email_sent_false(self):
+        db = self._db()
+        db.process_listings([self._listing()])
+        unsent = db.get_unsent_listings()
+        assert len(unsent) == 1
+        assert unsent[0]["email_sent"] == 0
+
+    def test_get_unsent_returns_full_data(self):
+        db = self._db()
+        db.process_listings([self._listing()])
+        unsent = db.get_unsent_listings()
+        assert unsent[0]["title"] == "Kia EV6 2022"
+        assert unsent[0]["price"] == 18000
+        assert isinstance(unsent[0]["image_urls"], list)
+
+    def test_mark_as_sent_sets_flag(self):
+        db = self._db()
+        db.process_listings([self._listing()])
+        db.mark_as_sent(["L1"])
+        assert db.get_unsent_listings() == []
+
+    def test_mark_as_sent_strips_rich_data(self):
+        db = self._db()
+        db.process_listings([self._listing()])
+        db.mark_as_sent(["L1"])
+        # Record still exists (needed for dedup) but display fields are gone
+        active = db.get_all_active()
+        assert len(active) == 0   # get_all_active filters on title IS NOT NULL
+
+    def test_sent_listing_still_deduplicates(self):
+        db = self._db()
+        listing = self._listing()
+        new1, _ = db.process_listings([listing])
+        assert len(new1) == 1
+        db.mark_as_sent(["L1"])
+        # Processing the same listing again should NOT produce a new entry
+        new2, _ = db.process_listings([listing])
+        assert len(new2) == 0
+
+    def test_price_change_resets_email_sent(self):
+        db = self._db()
+        db.process_listings([self._listing(price=18000)])
+        db.mark_as_sent(["L1"])
+        # New run, same car, different price
+        _, updated = db.process_listings([self._listing(price=17000)])
+        assert len(updated) == 1
+        unsent = db.get_unsent_listings()
+        assert len(unsent) == 1   # price change re-queues the listing for email
+
+    def test_no_price_change_stays_sent(self):
+        db = self._db()
+        db.process_listings([self._listing(price=18000)])
+        db.mark_as_sent(["L1"])
+        # Same price — should stay marked as sent
+        _, updated = db.process_listings([self._listing(price=18000)])
+        assert len(updated) == 0
+        assert db.get_unsent_listings() == []
+
+    def test_mark_as_sent_empty_list_is_safe(self):
+        db = self._db()
+        db.mark_as_sent([])   # should not raise
+
+    def test_migration_adds_column_to_existing_db(self):
+        """A db created without email_sent column should be migrated on init."""
+        import sqlite3, tempfile
+        tmp = tempfile.mkdtemp()
+        db_path = f"{tmp}/legacy.db"
+        # Create a bare-bones db without the email_sent column
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("""
+                CREATE TABLE listings (
+                    listing_id TEXT PRIMARY KEY,
+                    url TEXT,
+                    price INTEGER,
+                    first_seen TEXT,
+                    last_seen TEXT,
+                    times_seen INTEGER DEFAULT 1,
+                    is_new INTEGER DEFAULT 1
+                )
+            """)
+        # Opening through ListingDatabase should not raise and should add the column
+        db = ListingDatabase(db_path)
+        cols = {row[1] for row in db._connect().execute("PRAGMA table_info(listings)")}
+        assert "email_sent" in cols

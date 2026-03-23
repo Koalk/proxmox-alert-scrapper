@@ -92,7 +92,7 @@ class CarGurusScraper:
         self.max_images     = lim.get("max_images_per_listing", 3)
         self._cookie_done   = False
 
-    async def scrape_all(self, searches: list) -> list:
+    async def scrape_all(self, searches: list, on_search_done=None) -> list:
         """Run all enabled searches sequentially."""
         all_listings = []
         async with async_playwright() as p:
@@ -135,6 +135,8 @@ class CarGurusScraper:
                     logger.info(
                         f"  → {len(results)} CarGurus listings for {search['name']}"
                     )
+                    if on_search_done and results:
+                        on_search_done(results)
                 except Exception as exc:
                     logger.error(f"CarGurus search failed: {exc}", exc_info=True)
                 if i < len(searches) - 1:

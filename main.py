@@ -161,10 +161,19 @@ async def main():
 
     all_scraped = []
 
+    # Save each search's results to DB immediately as it completes.
+    # This means a crash or restart mid-run won't lose already-scraped data —
+    # unsent listings from a previous partial run are included in the next email.
+    def _save_partial(listings: list):
+        db.process_listings(listings)
+
     # --- AutoTrader ---
     logger.info("--- AutoTrader ---")
+    at_results = []
     try:
-        at_results = await AutoTraderScraper(config).scrape_all(enabled)
+        at_results = await AutoTraderScraper(config).scrape_all(
+            enabled, on_search_done=_save_partial
+        )
         all_scraped.extend(at_results)
         logger.info(f"AutoTrader total: {len(at_results)} listings")
     except Exception as exc:
@@ -176,22 +185,32 @@ async def main():
         try:
             cg_results = await CarGurusScraper(config).scrape_all(enabled)
             all_scraped.extend(cg_results)
-            logger.info(f"CarGurus total: {len(cg_results)} listings")
+            # Cross-source dedup: only save CG listings that aren't already
+            # represented by an AutoTrader entry (same price+mileage+title prefix)
+            unique_cg = [
+                l for l in dedup_across_sources(at_results + cg_results)
+                if l.source == "cargurus"
+            ]
+            if unique_cg:
+                db.process_listings(unique_cg)
+            logger.info(
+                f"CarGurus total: {len(cg_results)} listings "
+                f"({len(unique_cg)} unique after cross-source dedup)"
+            )
         except Exception as exc:
             logger.error(f"CarGurus scraper crashed: {exc}", exc_info=True)
 
-    # --- Cross-source deduplication ---
-    all_scraped = dedup_across_sources(all_scraped)
-    logger.info(f"Total after dedup: {len(all_scraped)}")
-
-    # --- DB ---
-    new_listings, updated_listings = db.process_listings(all_scraped)
-    db.mark_run_end(run_id, len(all_scraped), len(new_listings))
     stats = db.get_stats()
 
+    # --- Gather unsent listings (includes leftovers from any previous crashed run) ---
+    unsent = db.get_unsent_listings()
+    new_listings     = [l for l in unsent if l.get("is_new")]
+    updated_listings = [l for l in unsent if not l.get("is_new")]
+
+    db.mark_run_end(run_id, len(all_scraped), len(new_listings))
+
     logger.info(
-        f"New: {len(new_listings)} | "
-        f"Price changes: {len(updated_listings)} | "
+        f"Unsent: {len(new_listings)} new | {len(updated_listings)} price changes | "
         f"Total in DB: {stats['total_in_db']}"
     )
 
@@ -208,8 +227,8 @@ async def main():
             "price_changes":   len(updated_listings),
             "total_in_db":     stats["total_in_db"],
         },
-        "new_listings":         [l.to_dict() for l in new_listings],
-        "price_changes":        [l.to_dict() for l in updated_listings],
+        "new_listings":         new_listings,
+        "price_changes":        updated_listings,
         "all_current_listings": db.get_all_active(),
     }
     with open(json_path, "w") as f:
@@ -218,10 +237,13 @@ async def main():
 
     # --- Email ---
     if args.dry_run:
-        logger.info("Dry run — email skipped")
-    elif new_listings or updated_listings or args.force_email:
-        send_email(config, new_listings, updated_listings,
-                   db.get_all_active(), stats)
+        logger.info(f"Dry run — email skipped ({len(unsent)} unsent listings queued)")
+    elif unsent or args.force_email:
+        ok = send_email(config, new_listings, updated_listings,
+                        db.get_all_active(), stats)
+        if ok:
+            db.mark_as_sent([l["listing_id"] for l in unsent])
+            logger.info(f"Email sent — {len(unsent)} listings marked as sent and data stripped")
     else:
         logger.info("Nothing new — email skipped")
 

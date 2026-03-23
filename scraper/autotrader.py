@@ -105,7 +105,7 @@ class AutoTraderScraper:
     # Public
     # ------------------------------------------------------------------
 
-    async def scrape_all(self, searches: list) -> list:
+    async def scrape_all(self, searches: list, on_search_done=None) -> list:
         """Run all enabled searches sequentially, single browser instance."""
         all_listings = []
         async with async_playwright() as p:

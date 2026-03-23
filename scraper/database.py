@@ -9,7 +9,7 @@ Also stores full listing data for the JSON export.
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -43,13 +43,14 @@ class ListingDatabase:
                     seller_name     TEXT,
                     spec_summary    TEXT,
                     url             TEXT,
-                    image_urls      TEXT,   -- JSON array
+                    image_urls      TEXT,
                     attention_check TEXT,
                     scraped_at      TEXT,
                     first_seen      TEXT,
                     last_seen       TEXT,
                     times_seen      INTEGER DEFAULT 1,
-                    is_new          INTEGER DEFAULT 1  -- 1 = new this run
+                    is_new          INTEGER DEFAULT 1,
+                    email_sent      INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS run_log (
@@ -60,12 +61,16 @@ class ListingDatabase:
                     new_count    INTEGER
                 );
             """)
+            # Migrate existing databases that predate the email_sent column
+            existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(listings)")}
+            if "email_sent" not in existing_cols:
+                conn.execute("ALTER TABLE listings ADD COLUMN email_sent INTEGER DEFAULT 0")
 
     def mark_run_start(self) -> int:
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO run_log (started_at) VALUES (?)",
-                (datetime.utcnow().isoformat(),)
+                (datetime.now(timezone.utc).isoformat(),)
             )
             return cur.lastrowid
 
@@ -74,7 +79,7 @@ class ListingDatabase:
             conn.execute(
                 "UPDATE run_log SET finished_at=?, total_found=?, new_count=? "
                 "WHERE run_id=?",
-                (datetime.utcnow().isoformat(), total, new_count, run_id)
+                (datetime.now(timezone.utc).isoformat(), total, new_count, run_id)
             )
 
     def process_listings(self, listings: list) -> tuple[list, list]:
@@ -83,14 +88,11 @@ class ListingDatabase:
         Updates DB accordingly.
         Returns (new_listings, updated_listings).
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         new_listings = []
         updated_listings = []
 
         with self._connect() as conn:
-            # Reset is_new flag from previous run
-            conn.execute("UPDATE listings SET is_new = 0")
-
             for listing in listings:
                 existing = conn.execute(
                     "SELECT * FROM listings WHERE listing_id = ?",
@@ -125,17 +127,37 @@ class ListingDatabase:
                     )
                     conn.execute("""
                         UPDATE listings SET
-                            last_seen = ?,
-                            times_seen = times_seen + 1,
-                            price = COALESCE(?, price),
+                            last_seen       = ?,
+                            times_seen      = times_seen + 1,
+                            price           = COALESCE(?, price),
+                            title           = ?,
+                            year            = COALESCE(?, year),
+                            mileage         = COALESCE(?, mileage),
+                            location        = COALESCE(?, location),
+                            distance_miles  = COALESCE(?, distance_miles),
+                            seller_type     = COALESCE(?, seller_type),
+                            seller_name     = COALESCE(?, seller_name),
+                            spec_summary    = COALESCE(?, spec_summary),
+                            image_urls      = ?,
                             attention_check = ?,
-                            is_new = 0
+                            is_new          = 0,
+                            email_sent      = CASE WHEN ? THEN 0 ELSE email_sent END
                         WHERE listing_id = ?
                     """, (
                         now,
                         listing.price,
+                        listing.title,
+                        listing.year,
+                        listing.mileage,
+                        listing.location,
+                        listing.distance_miles,
+                        listing.seller_type,
+                        listing.seller_name,
+                        listing.spec_summary,
+                        json.dumps(listing.image_urls),
                         listing.attention_check,
-                        listing.listing_id
+                        price_changed,   # reset email_sent only if price changed
+                        listing.listing_id,
                     ))
                     if price_changed:
                         listing.attention_check += (
@@ -145,14 +167,54 @@ class ListingDatabase:
 
         return new_listings, updated_listings
 
-    def get_all_active(self) -> list[dict]:
-        """Return all listings seen in the most recent run as dicts."""
+    def get_unsent_listings(self) -> list[dict]:
+        """Return all listings not yet included in a sent email, with full data."""
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT * FROM listings
-                WHERE last_seen >= (
-                    SELECT MAX(last_seen) FROM listings
-                )
+                WHERE email_sent = 0 AND title IS NOT NULL
+                ORDER BY first_seen ASC, price ASC
+            """).fetchall()
+            result = []
+            for row in rows:
+                d = dict(row)
+                d["image_urls"] = json.loads(d.get("image_urls") or "[]")
+                result.append(d)
+            return result
+
+    def mark_as_sent(self, listing_ids: list[str]):
+        """
+        Mark listings as sent and strip rich display data.
+        Keeps only the fields needed to detect duplicates on future runs:
+        listing_id, url, price, first_seen, last_seen, times_seen.
+        """
+        if not listing_ids:
+            return
+        placeholders = ",".join("?" * len(listing_ids))
+        with self._connect() as conn:
+            conn.execute(f"""
+                UPDATE listings SET
+                    email_sent      = 1,
+                    title           = NULL,
+                    year            = NULL,
+                    mileage         = NULL,
+                    location        = NULL,
+                    distance_miles  = NULL,
+                    seller_type     = NULL,
+                    seller_name     = NULL,
+                    spec_summary    = NULL,
+                    image_urls      = NULL,
+                    attention_check = NULL,
+                    scraped_at      = NULL
+                WHERE listing_id IN ({placeholders})
+            """, listing_ids)
+
+    def get_all_active(self) -> list[dict]:
+        """Return all listings that still have full data (not yet stripped after send)."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT * FROM listings
+                WHERE title IS NOT NULL
                 ORDER BY price ASC
             """).fetchall()
             result = []
