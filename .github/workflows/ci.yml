@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run integration tests nightly at 03:00 UTC (after your Proxmox scraper runs)
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      run_integration:
+        description: "Run integration tests against live AutoTrader"
+        type: boolean
+        default: false
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest tests/test_unit.py -v
+
+  integration-tests:
+    name: Integration tests (live AutoTrader)
+    runs-on: ubuntu-latest
+    # Only run on the nightly schedule or when manually triggered with the flag
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_integration)
+    # Don't block anything on integration test failures — AutoTrader may block CI IPs
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium --with-deps
+
+      - name: Run integration tests
+        run: pytest tests/test_integration.py --run-integration -v -s

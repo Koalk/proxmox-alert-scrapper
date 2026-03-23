@@ -189,6 +189,17 @@ systemctl list-timers ev-scraper
 cat /opt/ev-scraper/data/latest_results.json | python3 -m json.tool | head -100
 ```
 
+### Updating the code in your container
+
+Run this on the **Proxmox host** shell to pull the latest code and refresh dependencies:
+
+```bash
+pct exec 300 -- su -s /bin/bash evscraper -c \
+  "cd /opt/ev-scraper && git pull && venv/bin/pip install -q -r requirements.txt"
+```
+
+The scraper will also notify you in the email digest when new commits are available on the remote, so you'll know when an update is worth applying.
+
 ---
 
 ## The JSON file

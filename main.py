@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import logging
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -72,6 +73,44 @@ def apply_defaults(searches: list, defaults: dict) -> list:
         s["autotrader"] = at
         result.append(s)
     return result
+
+
+def check_for_update(install_dir: str) -> dict | None:
+    """
+    Fetch remote refs and compare with local HEAD.
+    Returns a dict with 'local', 'remote', and 'behind' count if behind,
+    or None if the check fails or the repo is up to date.
+    Runs as a subprocess so a git failure never crashes the scraper.
+    """
+    logger = logging.getLogger("main")
+    try:
+        repo = Path(install_dir)
+        if not (repo / ".git").exists():
+            return None
+        subprocess.run(
+            ["git", "-C", str(repo), "fetch", "--quiet"],
+            timeout=15, capture_output=True,
+        )
+        local = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        remote = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "@{u}"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        if not local or not remote or local == remote:
+            return None
+        behind = int(subprocess.run(
+            ["git", "-C", str(repo), "rev-list", "--count", f"{local}..{remote}"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip() or 0)
+        if behind > 0:
+            logger.info(f"Update available: {behind} new commit(s) on remote")
+            return {"local": local[:8], "remote": remote[:8], "behind": behind}
+    except Exception as exc:
+        logger.debug(f"Update check failed (non-fatal): {exc}")
+    return None
 
 
 def dedup_across_sources(listings: list) -> list:
@@ -239,8 +278,9 @@ async def main():
     if args.dry_run:
         logger.info(f"Dry run — email skipped ({len(unsent)} unsent listings queued)")
     elif unsent or args.force_email:
+        update_info = check_for_update(str(Path(args.config).parent))
         ok = send_email(config, new_listings, updated_listings,
-                        db.get_all_active(), stats)
+                        db.get_all_active(), stats, update_info=update_info)
         if ok:
             db.mark_as_sent([l["listing_id"] for l in unsent])
             logger.info(f"Email sent — {len(unsent)} listings marked as sent and data stripped")

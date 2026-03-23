@@ -7,13 +7,14 @@ Run with:  pytest tests/test_unit.py -v
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 # Make sure the repo root is on sys.path when running from any directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scraper.autotrader import build_autotrader_url, Listing
 from scraper.database import ListingDatabase
-from main import apply_defaults
+from main import apply_defaults, check_for_update
 
 
 # ---------------------------------------------------------------------------
@@ -259,3 +260,83 @@ class TestListingDatabase:
         db = ListingDatabase(db_path)
         cols = {row[1] for row in db._connect().execute("PRAGMA table_info(listings)")}
         assert "email_sent" in cols
+
+
+# ---------------------------------------------------------------------------
+# check_for_update
+# ---------------------------------------------------------------------------
+
+class TestCheckForUpdate:
+    """Tests use a real temp git repo so no subprocess mocking is needed."""
+
+    def _make_repo_with_remote(self):
+        """
+        Create two real bare git repos (origin + clone) so we can simulate
+        being behind by committing to origin without pulling into the clone.
+        Returns the clone path as a string.
+        """
+        import subprocess
+        tmp = Path(tempfile.mkdtemp())
+
+        origin = tmp / "origin.git"
+        origin.mkdir()
+        subprocess.run(["git", "init", "--bare", str(origin)], capture_output=True, check=True)
+
+        clone = tmp / "clone"
+        subprocess.run(["git", "clone", str(origin), str(clone)], capture_output=True, check=True)
+
+        # Configure git identity for commits
+        for cmd in [
+            ["git", "-C", str(clone), "config", "user.email", "test@test.com"],
+            ["git", "-C", str(clone), "config", "user.name", "Test"],
+        ]:
+            subprocess.run(cmd, capture_output=True, check=True)
+
+        # Make an initial commit so the branch and upstream exist
+        (clone / "README.md").write_text("initial")
+        subprocess.run(["git", "-C", str(clone), "add", "."], capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(clone), "commit", "-m", "init"], capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(clone), "push"], capture_output=True, check=True)
+
+        return str(clone), str(origin)
+
+    def test_returns_none_when_no_git_dir(self):
+        tmp = tempfile.mkdtemp()
+        assert check_for_update(tmp) is None
+
+    def test_returns_none_when_up_to_date(self):
+        clone, _ = self._make_repo_with_remote()
+        assert check_for_update(clone) is None
+
+    def test_detects_new_remote_commits(self):
+        import subprocess
+        clone, origin = self._make_repo_with_remote()
+
+        # Make a second clone to push new commits to origin without updating `clone`
+        tmp2 = Path(tempfile.mkdtemp())
+        pusher = tmp2 / "pusher"
+        subprocess.run(["git", "clone", str(origin), str(pusher)], capture_output=True, check=True)
+        for cmd in [
+            ["git", "-C", str(pusher), "config", "user.email", "test@test.com"],
+            ["git", "-C", str(pusher), "config", "user.name", "Test"],
+        ]:
+            subprocess.run(cmd, capture_output=True, check=True)
+        (pusher / "new.txt").write_text("change")
+        subprocess.run(["git", "-C", str(pusher), "add", "."], capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(pusher), "commit", "-m", "new commit"], capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(pusher), "push"], capture_output=True, check=True)
+
+        result = check_for_update(clone)
+        assert result is not None
+        assert result["behind"] == 1
+        assert len(result["local"]) == 8
+        assert len(result["remote"]) == 8
+        assert result["local"] != result["remote"]
+
+    def test_returns_none_on_git_failure(self):
+        # A path with a .git dir but git fetch fails (no network / bad remote)
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / ".git").mkdir()
+        # No valid git repo — git commands will fail, should return None gracefully
+        result = check_for_update(str(tmp))
+        assert result is None
