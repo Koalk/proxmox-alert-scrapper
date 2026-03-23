@@ -158,12 +158,15 @@ limits:
   scroll_pause_ms: 1500        # pause to trigger lazy-load
   request_delay_ms: 3000       # pause between listings (be polite)
   search_delay_ms: 8000        # pause between different car models
-  max_listings_per_search: 50  # hard cap per search
+  max_pages_per_search: 2      # results sorted price-asc — pages 1-2 = the cheapest
+  max_listings_per_search: 20  # keep the 20 cheapest matching listings per search
   max_images_per_listing: 3    # images embedded in email
 ```
 
-With 7 searches at 50 listings each and 3 second delays, a full run takes
-roughly 2-4 hours — well within the 12 hour window.
+Results are sorted by price ascending, so the first 2 pages always contain
+the cheapest available listings. Combined with per-search `require_keywords`
+filters, 20 results per search is plenty — you won't miss bargains that
+don't appear in the first ~26 organic listings.
 
 ---
 

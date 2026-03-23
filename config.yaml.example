@@ -28,7 +28,8 @@ limits:
   scroll_pause_ms: 1500        # pause between scrolls (be polite to sites)
   request_delay_ms: 3000       # pause between listings within a search
   search_delay_ms: 8000        # pause between different searches
-  max_listings_per_search: 50  # cap per search to avoid runaway scrapes
+  max_pages_per_search: 2      # results are sorted price-asc, so page 1-2 = cheapest
+  max_listings_per_search: 20  # the 20 cheapest matching listings per search
   max_images_per_listing: 3    # images to embed in email per car
 
 # --- Database ---

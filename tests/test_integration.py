@@ -25,7 +25,7 @@ from scraper.autotrader import AutoTraderScraper, build_autotrader_url
 
 
 # ---------------------------------------------------------------------------
-# Minimal config that hits AutoTrader for 1 listing only
+# Minimal config that hits AutoTrader for 3 listings so we can verify ordering
 # ---------------------------------------------------------------------------
 
 MINIMAL_CONFIG = {
@@ -34,7 +34,8 @@ MINIMAL_CONFIG = {
         "scroll_pause_ms":        1000,
         "request_delay_ms":       1000,
         "search_delay_ms":        1000,
-        "max_listings_per_search": 1,    # fetch exactly 1
+        "max_pages_per_search":   1,
+        "max_listings_per_search": 3,
         "max_images_per_listing":  1,
     }
 }
@@ -64,9 +65,11 @@ MINIMAL_SEARCH = {
 @pytest.mark.integration
 def test_autotrader_returns_at_least_one_listing():
     """
-    Full end-to-end: open AutoTrader, collect URLs from page 1,
-    fetch the first listing's detail page, assert we got back a
-    populated Listing object.
+    Full end-to-end: scrape 3 Kia EV6 listings, assert:
+    - At least one result returned
+    - No promoted/injected journey URLs slipped through
+    - Results are price-sorted ascending
+    - Basic listing fields look valid
     """
     scraper  = AutoTraderScraper(MINIMAL_CONFIG)
     listings = asyncio.run(scraper.scrape_all([MINIMAL_SEARCH]))
@@ -74,6 +77,19 @@ def test_autotrader_returns_at_least_one_listing():
     assert len(listings) >= 1, (
         "Expected at least one listing from AutoTrader — "
         "check your internet connection or whether AutoTrader changed their HTML."
+    )
+
+    # No promoted/injected listings should appear in results
+    _INJECTED = ("PROMOTED_LISTING", "FEATURED_LISTING", "YOU_MAY_ALSO_LIKE")
+    for car in listings:
+        assert not any(j in car.url for j in _INJECTED), (
+            f"Injected listing slipped through filter: {car.url}"
+        )
+
+    # Results must be price-sorted ascending (None prices sorted to end)
+    prices = [car.price for car in listings if car.price is not None]
+    assert prices == sorted(prices), (
+        f"Listings are not price-sorted ascending: {prices}"
     )
 
     car = listings[0]

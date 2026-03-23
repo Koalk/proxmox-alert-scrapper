@@ -97,7 +97,8 @@ class AutoTraderScraper:
         self.scroll_pause   = lim.get("scroll_pause_ms", 1500) / 1000
         self.request_delay  = lim.get("request_delay_ms", 3000) / 1000
         self.search_delay   = lim.get("search_delay_ms", 8000) / 1000
-        self.max_per_search = lim.get("max_listings_per_search", 50)
+        self.max_per_search = lim.get("max_listings_per_search", 20)
+        self.max_pages      = lim.get("max_pages_per_search", 2)
         self.max_images     = lim.get("max_images_per_listing", 3)
         self._cookie_accepted = False   # only need to do this once per session
 
@@ -183,6 +184,11 @@ class AutoTraderScraper:
         page_num = 1
 
         while len(listings) < self.max_per_search:
+            if page_num > self.max_pages:
+                logger.info(
+                    f"  Page limit ({self.max_pages}) reached — stopping pagination"
+                )
+                break
             url = build_autotrader_url(at_cfg, page_num)
             page = await context.new_page()
             try:
@@ -320,13 +326,25 @@ class AutoTraderScraper:
             "els => els.map(e => e.href)",
         )
 
-        # Deduplicate by base URL (strip query params)
+        # Deduplicate and strip promoted/featured/YMAL injections.
+        # AutoTrader injects these on every results page — they often don't
+        # match the search criteria and would waste the entire page budget.
+        _INJECTED_JOURNEYS = (
+            "journey=PROMOTED_LISTING_JOURNEY",
+            "journey=FEATURED_LISTING_JOURNEY",
+            "journey=YOU_MAY_ALSO_LIKE_JOURNEY",
+        )
         seen, clean = set(), []
         for link in links:
             base = link.split("?")[0]
             if base not in seen and "/car-details/" in link:
-                seen.add(base)
-                clean.append(link)
+                if not any(j in link for j in _INJECTED_JOURNEYS):
+                    seen.add(base)
+                    clean.append(link)
+        if len(clean) < len(links):
+            logger.debug(
+                f"  Filtered {len(links) - len(clean)} promoted/injected listings"
+            )
         return clean
 
     # ------------------------------------------------------------------

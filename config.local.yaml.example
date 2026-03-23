@@ -28,6 +28,7 @@ limits:
   scroll_pause_ms: 1500
   request_delay_ms: 2000
   search_delay_ms: 5000
+  max_pages_per_search: 2      # 2 pages is enough to see the cheapest results
   max_listings_per_search: 5   # keep small when testing — don't hammer the site
   max_images_per_listing: 3
 
