@@ -1,0 +1,4 @@
+playwright>=1.40.0
+pyyaml>=6.0
+aiofiles>=23.0
+pytest>=8.0

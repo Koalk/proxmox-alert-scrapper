@@ -1,0 +1,71 @@
+# ============================================================
+# EV Car Alert Scraper - LOCAL DEV CONFIG
+# Copy to config.local.yaml and fill in your details.
+# Uses relative paths so it works on Windows/Mac/Linux.
+# ============================================================
+
+# --- Email Settings ---
+email:
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_user: "you@gmail.com"
+  smtp_password: "your_app_password"
+  to: "you@gmail.com"
+  subject_prefix: "🚗 EV Alert"
+
+# --- Search Defaults ---
+defaults:
+  postcode: "EH1 3HU"    # change to your postcode
+  radius: 120
+  fuel_type: "Electric"
+  year_from: 2021
+  mileage_max: 110000
+
+# --- Resource Limits (dialled back for local runs) ---
+limits:
+  max_concurrent_pages: 1
+  page_timeout_ms: 30000
+  scroll_pause_ms: 1500
+  request_delay_ms: 2000
+  search_delay_ms: 5000
+  max_listings_per_search: 5   # keep small when testing — don't hammer the site
+  max_images_per_listing: 3
+
+# --- Database (relative path — created automatically) ---
+database:
+  path: "./data/listings.db"
+
+# --- Output (relative paths) ---
+output:
+  json_path: "./data/latest_results.json"
+  log_path: "./logs/scraper.log"
+
+# --- Searches (one enabled for quick testing, rest disabled) ---
+searches:
+
+  - name: "Kia EV6 (test)"
+    enabled: true
+    autotrader:
+      make: "Kia"
+      model: "EV6"
+      price_max: 25000
+    require_keywords: []
+    exclude_keywords: ["GT"]
+
+  - name: "Skoda Enyaq iV 80"
+    enabled: false
+    autotrader:
+      make: "Skoda"
+      model: "Enyaq"
+      price_max: 18000
+    require_keywords: ["82kWh", "80"]
+    exclude_keywords: ["60kWh", "iV 60"]
+
+  - name: "Hyundai Ioniq 5"
+    enabled: false
+    autotrader:
+      make: "Hyundai"
+      model: "Ioniq 5"
+      price_max: 22000
+    require_keywords: []
+    exclude_keywords: []

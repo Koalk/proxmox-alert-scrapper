@@ -1,0 +1,8 @@
+.app-password
+config.yaml
+config.local.yaml
+data/
+logs/
+__pycache__/
+*.pyc
+venv/

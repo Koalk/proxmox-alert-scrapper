@@ -1,0 +1,134 @@
+# ============================================================
+# EV Car Alert Scraper - Configuration
+# Edit this file to customise your searches and notifications
+# ============================================================
+
+# --- Email Settings ---
+email:
+  smtp_host: "smtp.gmail.com"        # or smtp.office365.com, your own server, etc.
+  smtp_port: 587
+  smtp_user: "you@gmail.com"         # sender address
+  smtp_password: "your_app_password" # Gmail: use App Password not account password
+  to: "you@youremail.com"            # where to send the digest
+  subject_prefix: "🚗 EV Alert"
+
+# --- Search Defaults ---
+# These apply to every search unless overridden in the individual search block.
+defaults:
+  postcode: "EH1 3HU"      # your postcode for distance calculations
+  radius: 120               # miles
+  fuel_type: "Electric"
+  year_from: 2021
+  mileage_max: 110000
+
+# --- Resource Limits (tune for your Proxmox server) ---
+limits:
+  max_concurrent_pages: 1      # keep at 1 to be gentle on RAM
+  page_timeout_ms: 30000       # 30s per page load
+  scroll_pause_ms: 1500        # pause between scrolls (be polite to sites)
+  request_delay_ms: 3000       # pause between listings within a search
+  search_delay_ms: 8000        # pause between different searches
+  max_listings_per_search: 50  # cap per search to avoid runaway scrapes
+  max_images_per_listing: 3    # images to embed in email per car
+
+# --- Database ---
+database:
+  path: "/opt/ev-scraper/data/listings.db"
+
+# --- Output ---
+output:
+  json_path: "/opt/ev-scraper/data/latest_results.json"
+  log_path: "/opt/ev-scraper/logs/scraper.log"
+
+# --- Searches ---
+# Each search hits AutoTrader UK with your criteria.
+# 'keywords' are matched against the title/spec Playwright sees on the page.
+# Set 'enabled: false' to pause a search without deleting it.
+# All autotrader fields are optional — missing ones fall back to 'defaults' above.
+searches:
+
+  - name: "Skoda Enyaq iV 80"
+    enabled: true
+    autotrader:
+      make: "Skoda"
+      model: "Enyaq"
+      price_max: 18000
+    # Additional keyword filters applied to listing title/spec text
+    # ALL must be present (case-insensitive) for listing to be included
+    require_keywords: ["82kWh", "80"]
+    # If ANY of these appear, listing is skipped
+    exclude_keywords: ["60kWh", "iV 60"]
+
+  - name: "Kia EV6"
+    enabled: true
+    autotrader:
+      make: "Kia"
+      model: "EV6"
+      price_max: 22000
+    require_keywords: []
+    exclude_keywords: ["GT"]   # GT is rare and overpriced used
+
+  - name: "Hyundai Ioniq 5"
+    enabled: true
+    autotrader:
+      make: "Hyundai"
+      model: "Ioniq 5"
+      price_max: 22000
+    require_keywords: []
+    exclude_keywords: []
+
+  - name: "VW ID.4 Pro"
+    enabled: true
+    autotrader:
+      make: "Volkswagen"
+      model: "ID.4"
+      price_max: 18000
+    require_keywords: ["Pro"]
+    exclude_keywords: []
+
+  - name: "BMW iX3"
+    enabled: true
+    autotrader:
+      make: "BMW"
+      model: "iX3"
+      price_max: 23000
+    require_keywords: []
+    exclude_keywords: []
+
+  - name: "BYD Sealion 7 (Watch)"
+    enabled: true
+    autotrader:
+      make: "BYD"
+      model: "Sealion 7"
+      price_max: 26000
+      radius: 300         # override — wider net for rarer model
+      year_from: 2023
+      mileage_max: 60000
+    require_keywords: []
+    exclude_keywords: []
+
+  # --- Future models: these will return nothing until cars appear ---
+  - name: "Skoda Peaq (Future Watch)"
+    enabled: true
+    autotrader:
+      make: "Skoda"
+      model: "Peaq"
+      price_max: 40000
+      radius: 300
+      year_from: 2026
+      mileage_max: 50000
+    require_keywords: []
+    exclude_keywords: []
+
+  - name: "Kia PV5 7-seat (Future Watch)"
+    enabled: true
+    autotrader:
+      make: "Kia"
+      model: "PV5"
+      price_max: 35000
+      radius: 300
+      year_from: 2026
+      mileage_max: 50000
+    require_keywords: []
+    exclude_keywords: []
+
