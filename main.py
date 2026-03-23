@@ -8,6 +8,7 @@ and writes latest_results.json.
 Usage:
     python3 main.py                          # normal overnight run
     python3 main.py --dry-run                # scrape, save JSON, no email
+    python3 main.py --quick                  # 1 listing per search, no email — fast sanity check
     python3 main.py --force-email            # send digest even if nothing new
     python3 main.py --test-email             # send a test email immediately
     python3 main.py --autotrader-only        # skip CarGurus (faster)
@@ -150,6 +151,8 @@ async def main():
         default=Path(__file__).parent / "config.yaml")
     parser.add_argument("--dry-run", action="store_true",
         help="Scrape and save but do not send email")
+    parser.add_argument("--quick", action="store_true",
+        help="1 page, 1 listing per search — fast sanity check that scraping works")
     parser.add_argument("--force-email", action="store_true",
         help="Send email even if no new listings")
     parser.add_argument("--test-email", action="store_true",
@@ -159,6 +162,13 @@ async def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+
+    if args.quick:
+        config.setdefault("limits", {})
+        config["limits"]["max_pages_per_search"]    = 1
+        config["limits"]["max_scrapes_per_search"]  = 1  # visit 1 URL per search max
+        config["limits"]["max_listings_per_search"] = 1
+        args.dry_run = True   # quick mode never sends email
 
     log_path = config.get("output", {}).get(
         "log_path", "/opt/ev-scraper/logs/scraper.log"

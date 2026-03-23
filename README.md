@@ -176,6 +176,9 @@ don't appear in the first ~26 organic listings.
 # Run now (sends email if new listings found)
 systemctl start ev-scraper
 
+# Quick sanity check — 1 listing per search, no email (completes in ~5 min)
+sudo -u evscraper /opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --quick
+
 # Run now, don't send email
 sudo -u evscraper /opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --dry-run
 

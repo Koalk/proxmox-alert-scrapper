@@ -99,6 +99,7 @@ class AutoTraderScraper:
         self.search_delay   = lim.get("search_delay_ms", 8000) / 1000
         self.max_per_search = lim.get("max_listings_per_search", 20)
         self.max_pages      = lim.get("max_pages_per_search", 2)
+        self.max_scrapes    = lim.get("max_scrapes_per_search", self.max_per_search * 4)
         self.max_images     = lim.get("max_images_per_listing", 3)
         self._cookie_accepted = False   # only need to do this once per session
 
@@ -182,6 +183,7 @@ class AutoTraderScraper:
         require  = [k.lower() for k in search.get("require_keywords", [])]
         exclude  = [k.lower() for k in search.get("exclude_keywords", [])]
         page_num = 1
+        scrapes  = 0
 
         while len(listings) < self.max_per_search:
             if page_num > self.max_pages:
@@ -215,6 +217,12 @@ class AutoTraderScraper:
             for url_idx, listing_url in enumerate(listing_urls):
                 if len(listings) >= self.max_per_search:
                     break
+                if scrapes >= self.max_scrapes:
+                    logger.info(
+                        f"  Scrape limit ({self.max_scrapes}) reached — stopping"
+                    )
+                    break
+                scrapes += 1
                 logger.info(
                     f"    [{url_idx+1}/{len(listing_urls)}] Scraping: "
                     f"{listing_url.split('/')[-1]}"
