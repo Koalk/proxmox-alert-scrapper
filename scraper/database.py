@@ -104,6 +104,12 @@ class ListingDatabase:
                 "INSERT INTO run_log (started_at) VALUES (?)",
                 (datetime.now(timezone.utc).isoformat(),)
             )
+            # Keep only the most recent 90 run_log rows
+            conn.execute("""
+                DELETE FROM run_log WHERE run_id NOT IN (
+                    SELECT run_id FROM run_log ORDER BY run_id DESC LIMIT 90
+                )
+            """)
             return cur.lastrowid
 
     def mark_run_end(self, run_id: int, total: int, new_count: int):
@@ -267,6 +273,8 @@ class ListingDatabase:
                     scraped_at      = NULL
                 WHERE listing_id IN ({placeholders})
             """, listing_ids)
+            # Reclaim disk space freed by the NULL updates
+            conn.execute("VACUUM")
 
     def get_all_active(self) -> list[dict]:
         """Return all listings that still have full data (not yet stripped after send)."""
