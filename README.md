@@ -177,13 +177,13 @@ don't appear in the first ~26 organic listings.
 systemctl start ev-scraper
 
 # Quick sanity check — 1 listing per search, no email (completes in ~5 min)
-sudo -u evscraper /opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --quick
+su -s /bin/bash evscraper -c "/opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --quick"
 
 # Run now, don't send email
-sudo -u evscraper /opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --dry-run
+su -s /bin/bash evscraper -c "/opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --dry-run"
 
 # Force send email even if nothing new
-sudo -u evscraper /opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --force-email
+su -s /bin/bash evscraper -c "/opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --force-email"
 
 # Watch live log output
 journalctl -u ev-scraper -f
@@ -193,6 +193,13 @@ systemctl list-timers ev-scraper
 
 # View JSON output
 cat /opt/ev-scraper/data/latest_results.json | python3 -m json.tool | head -100
+
+# Re-send all previously seen listings (e.g. after fixing a bug that caused garbage results)
+# Marks everything in the DB as unsent — they all appear in the next email as new
+su -s /bin/bash evscraper -c "/opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --mark-unsent"
+
+# Wipe the database entirely and start fresh (all history lost)
+su -s /bin/bash evscraper -c "/opt/ev-scraper/venv/bin/python /opt/ev-scraper/main.py --reset-db"
 ```
 
 ### Updating the code in your container
@@ -201,7 +208,7 @@ Run this on the **Proxmox host** shell to pull the latest code and refresh depen
 
 ```bash
 pct exec 300 -- su -s /bin/bash evscraper -c \
-  "cd /opt/ev-scraper && git pull && venv/bin/pip install -q -r requirements.txt"
+  "cd /opt/ev-scraper && git pull && venv/bin/pip install -q -r requirements.txt && venv/bin/playwright install chromium"
 ```
 
 The scraper will also notify you in the email digest when new commits are available on the remote, so you'll know when an update is worth applying.
@@ -263,6 +270,7 @@ Integration tests are skipped by default (they hit a live site) — pass
 cd /opt/ev-scraper
 git pull
 /opt/ev-scraper/venv/bin/pip install -r requirements.txt
+/opt/ev-scraper/venv/bin/playwright install chromium
 systemctl restart ev-scraper.timer
 ```
 

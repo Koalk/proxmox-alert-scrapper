@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 """
-main.py — EV Car Alert Scraper
-Entry point. Loads config, runs AutoTrader + Motors.co.uk scrapers,
-deduplicates results, updates SQLite DB, sends HTML email digest,
-and writes latest_results.json.
+main.py — orchestrator
 
-Usage:
-    python3 main.py                          # normal overnight run
-    python3 main.py --dry-run                # scrape, save JSON, no email
-    python3 main.py --quick                  # 1 listing per search, no email — fast sanity check
-    python3 main.py --force-email            # send digest even if nothing new
-    python3 main.py --test-email             # send a test email immediately
-    python3 main.py --skip-motors            # skip Motors.co.uk scraper
-    python3 main.py --config /path/to/config.yaml
+RUN FLOW:
+  load_config → apply_defaults → get known_ids from DB
+    → AutoTraderScraper.scrape_all()   (on_search_done=_save_partial)
+    → MotorsScraper.scrape_all()       (results saved via _save_partial too)
+    → dedup_across_sources()           AT wins; dedup key=(price, mileage, title[:20])
+    → db.get_unsent_listings()         new + price-changed rows where email_sent=0
+    → send_email()                     marks rows sent + strips raw data
+    → JSON export to output.json_path
+
+KEY HELPERS:
+  apply_defaults()   merges config.defaults into each search.autotrader block.
+  _save_partial()    callback — writes each search's results to DB immediately
+                     so a mid-run crash doesn't lose already-scraped data.
+  get_searches_with_recent_unsent()  crash-resume: skips re-scraping searches
+                     that already have queued unsent data in the DB.
+  check_for_update() non-fatal git fetch; result shown in email header.
+
+CLI:
+  --dry-run       scrape + save, no email
+  --quick         1 listing/search, no email (sanity check)
+  --force-email   send even if nothing new
+  --test-email    send immediately, no scraping
+  --skip-motors   skip Motors.co.uk
+  --reset-db      wipe the entire DB and exit (all history lost, next run is fresh)
+  --mark-unsent   reset email_sent=0 on all rows so they re-appear in next email
+  --config PATH   alternate config file
 """
 
 import argparse
@@ -164,9 +179,31 @@ async def main():
         help="Send a test email immediately without scraping")
     parser.add_argument("--skip-motors", action="store_true",
         help="Skip Motors.co.uk scraper")
+    parser.add_argument("--reset-db", action="store_true",
+        help="Wipe the entire database and exit — all history lost, next run starts fresh")
+    parser.add_argument("--mark-unsent", action="store_true",
+        help="Mark all DB listings as unsent so they appear in the next email, then exit")
     args = parser.parse_args()
 
     config = load_config(args.config)
+
+    db_path = config.get("database", {}).get("path", "/opt/ev-scraper/data/listings.db")
+
+    if args.reset_db:
+        setup_logging(config.get("output", {}).get("log_path", "/opt/ev-scraper/logs/scraper.log"))
+        logger = logging.getLogger("main")
+        ListingDatabase(db_path).reset()
+        logger.info("Database wiped — all history cleared. Next run starts fresh.")
+        return
+
+    if args.mark_unsent:
+        setup_logging(config.get("output", {}).get("log_path", "/opt/ev-scraper/logs/scraper.log"))
+        logger = logging.getLogger("main")
+        db = ListingDatabase(db_path)
+        db.mark_all_unsent()
+        stats = db.get_stats()
+        logger.info(f"All {stats['total_in_db']} listings marked as unsent — they will appear in the next email.")
+        return
 
     if args.quick:
         config.setdefault("limits", {})
@@ -188,9 +225,6 @@ async def main():
     # --- Test email mode ---
     if args.test_email:
         logger.info("Test email mode — sending immediately")
-        db_path = config.get("database", {}).get(
-            "path", "/opt/ev-scraper/data/listings.db"
-        )
         db    = ListingDatabase(db_path)
         stats = db.get_stats()
         ok = send_email(config, [], [], db.get_all_active(), stats,
@@ -199,9 +233,6 @@ async def main():
         return
 
     # --- Init DB ---
-    db_path = config.get("database", {}).get(
-        "path", "/opt/ev-scraper/data/listings.db"
-    )
     db     = ListingDatabase(db_path)
     run_id = db.mark_run_start()
 

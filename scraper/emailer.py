@@ -1,8 +1,23 @@
 """
-scraper/emailer.py
-Builds and sends a rich HTML email digest.
-Each car gets its own card with images, price, mileage, flags,
-and a direct link to the AutoTrader listing.
+scraper/emailer.py — HTML email digest builder and sender
+
+ENTRY POINT:
+  send_email(config, new_listings, updated_listings, all_active, stats,
+             update_info=None, run_errors=None, max_email_listings=20)
+  All listing args are plain dicts (as returned by database.get_unsent_listings).
+
+STRUCTURE:
+  _car_card(listing, badge)  → HTML string for one car card (inline styles,
+                                images, price, mileage, flags, link).
+  send_email()               → builds full HTML, connects via SMTP STARTTLS,
+                                honours max_email_listings (excess → JSON only).
+
+KEY GOTCHAS:
+  - All CSS is inline — email clients strip <style> blocks.
+  - Images embedded as <img src="url"> (hotlinked, not attached) to keep
+    message size small.
+  - subject_prefix comes from config.email.subject_prefix.
+  - If run_errors is non-empty a red error banner is prepended to the email.
 """
 
 import json

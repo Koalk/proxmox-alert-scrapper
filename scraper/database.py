@@ -1,9 +1,22 @@
 """
-scraper/database.py
-SQLite-backed store for seen listings.
-Tracks which listing IDs have been seen before so only genuinely
-new listings trigger email alerts.
-Also stores full listing data for the JSON export.
+scraper/database.py — SQLite listing store
+
+KEY METHODS:
+  process_listings(listings)     upsert scraped Listing objects; sets is_new=1
+                                  on first insert, detects price changes.
+  get_unsent_listings()          returns rows where email_sent=0 (new + price
+                                  changes) — this is what goes in the email.
+  mark_sent(listing_ids)         clears email_sent=0 → 1 and strips raw data
+                                  after a successful email send.
+  get_known_listing_ids()        returns set of all IDs in DB — passed to
+                                  scrapers so they can skip already-seen pages.
+  get_searches_with_recent_unsent() used for crash-resume: skips re-scraping
+                                  searches that already have queued unsent data.
+  get_stats() / get_all_active() used for email header summary and JSON export.
+
+SCHEMA: listings table — listing_id (PK), source, search_name, title, price,
+  year, mileage, location, url, image_urls (JSON), is_new, email_sent,
+  first_seen, last_seen, times_seen, scraped_at, + all other Listing fields.
 """
 
 import json
@@ -68,6 +81,22 @@ class ListingDatabase:
                 conn.execute("ALTER TABLE listings ADD COLUMN email_sent INTEGER DEFAULT 0")
             if "source" not in existing_cols:
                 conn.execute("ALTER TABLE listings ADD COLUMN source TEXT DEFAULT 'autotrader'")
+
+    def reset(self):
+        """Drop and recreate all tables. Wipes everything — use with care."""
+        with self._connect() as conn:
+            conn.executescript("DROP TABLE IF EXISTS listings; DROP TABLE IF EXISTS run_log;")
+        self._init_db()
+
+    def mark_all_unsent(self):
+        """
+        Reset email_sent=0 on every listing so they all re-appear in the next
+        email. Also sets is_new=1 so they show as new rather than price-changes.
+        Useful after a run that produced garbage results but still marked valid
+        listings as sent.
+        """
+        with self._connect() as conn:
+            conn.execute("UPDATE listings SET email_sent=0, is_new=1")
 
     def mark_run_start(self) -> int:
         with self._connect() as conn:
@@ -164,9 +193,9 @@ class ListingDatabase:
                         listing.listing_id,
                     ))
                     if price_changed:
-                        listing.attention_check += (
-                            f" | 💲 Price changed from £{existing['price']:,}"
-                        )
+                        old_price = existing['price']
+                        old_str = f"£{old_price:,}" if old_price is not None else "unknown"
+                        listing.attention_check += f" | 💲 Price changed from {old_str}"
                         updated_listings.append(listing)
 
         return new_listings, updated_listings

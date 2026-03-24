@@ -1,12 +1,23 @@
 """
-scraper/cargurus.py
-CarGurus UK scraper — complements AutoTrader to catch listings
-that don't appear on both platforms.
+scraper/cargurus.py — CarGurus UK Playwright scraper
 
-CarGurus is generally more scraper-tolerant than AutoTrader and adds
-a useful "deal rating" (Great Deal / Good Deal / Fair / Overpriced)
-based on market price analysis — this is extracted and included in
-the attention flags.
+ARCHITECTURE:
+  CarGurusScraper.scrape_all(searches, on_search_done)
+    → _scrape_search()       builds CG URL, paginates while < max_per_search
+      → _get_listing_cards()   extracts cards via JS (no detail pages)
+      → _card_to_listing()     parses card dict into a Listing
+  Imports Listing, _jitter, _STEALTH_JS from autotrader.py.
+
+KEY GOTCHAS:
+  - URL structure is completely different: viewDetailsFilterViewInventoryListing
+    .action with numeric make/model IDs from _MAKE_MODELS dict.
+  - Does NOT accept known_ids (no pagination skip logic) — always scrapes page 1+.
+  - Deal rating (Great/Good/Fair/Overpriced) is extracted from card text and
+    appended to attention_check flags.
+  - Listing IDs prefixed with 'cg_'.
+  - Config block is still called 'autotrader' (at_cfg) — same config key reused.
+
+CONFIG KEYS: same search.autotrader block as autotrader.py.
 """
 
 import asyncio
@@ -176,7 +187,7 @@ class CarGurusScraper:
                     )
                     all_listings.extend(results)
                     logger.info(
-                        f"  → {len(results)} CarGurus listings for {search['name']}"
+                        f"  → {len(results)} listings for {search['name']}"
                     )
                     if on_search_done and results:
                         on_search_done(results)
@@ -209,7 +220,7 @@ class CarGurusScraper:
             try:
                 cards = await self._get_listing_cards(page, url)
             except Exception as exc:
-                logger.warning(f"  CarGurus page {page_num} failed: {exc}")
+                logger.warning(f"  Page {page_num} failed: {exc}")
                 await page.close()
                 break
             finally:
@@ -219,10 +230,10 @@ class CarGurusScraper:
                     pass
 
             if not cards:
-                logger.info(f"  CarGurus page {page_num}: no results")
+                logger.info(f"  Page {page_num}: no results")
                 break
 
-            logger.info(f"  CarGurus page {page_num}: {len(cards)} cards")
+            logger.info(f"  Page {page_num}: {len(cards)} cards")
 
             for card_data in cards:
                 if len(listings) >= self.max_per_search:

@@ -1,16 +1,26 @@
 """
-scraper/autotrader.py
-Playwright-based scraper for AutoTrader UK used car listings.
-Designed to be resource-light: single browser instance, sequential pages,
-generous delays. Prioritises completeness over speed.
+scraper/autotrader.py — AutoTrader UK Playwright scraper
 
-Anti-detection:
-- Randomised jitter on all delays
-- Stealth JS patches (hides navigator.webdriver, spoofs plugins/languages)
-- Realistic viewport, locale, timezone
-- Cookie consent handled on first load
-- Exponential backoff retry on transient failures
-- Tracker/font request blocking (~40% bandwidth saving)
+ARCHITECTURE:
+  AutoTraderScraper.scrape_all(searches, on_search_done, known_ids)
+    → _scrape_search()   builds search URL, paginates up to max_pages
+      → _get_listing_urls()  extracts href list from results page
+      → _scrape_listing()    visits EACH detail page individually (slow, rich)
+  Listing dataclass is defined HERE and imported by motors.py + cargurus.py.
+  _jitter() and _STEALTH_JS are also imported by both other scrapers.
+
+KEY GOTCHAS:
+  - price, year, mileage MUST all be initialized to None together at the top
+    of _scrape_listing() — Python treats any assigned-to name as local, so
+    leaving year out causes UnboundLocalError on every listing (was a bug).
+  - Promoted/injected listings (PROMOTED_LISTING_JOURNEY etc.) are stripped
+    from the URL list before scraping — they don't match search criteria.
+  - known_ids skips pages where every result is already in the DB; it tries
+    the next page instead (up to max_pages).
+  - _passes_filters() does require_keywords / exclude_keywords matching.
+
+CONFIG KEYS (under search.autotrader): make, model, price_max, year_from,
+  mileage_max, postcode, radius, fuel_type.
 """
 
 import asyncio
@@ -404,7 +414,7 @@ class AutoTraderScraper:
         listing_id = id_match.group(1) if id_match else url.split("/")[-1]
 
         # ---------- JSON-LD (most stable — AutoTrader embeds schema.org data) ----------
-        price, mileage = None, None
+        price, year, mileage = None, None, None
         try:
             ld_scripts = await page.eval_on_selector_all(
                 'script[type="application/ld+json"]',

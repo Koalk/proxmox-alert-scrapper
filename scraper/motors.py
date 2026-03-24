@@ -1,12 +1,23 @@
 """
-scraper/motors.py
-Motors.co.uk scraper — UK's third-largest used car classifieds.
-Complements AutoTrader and CarGurus with dealer-only listings,
-all HPI-checked before advertising.
+scraper/motors.py — Motors.co.uk Playwright scraper
 
-URL format: https://www.motors.co.uk/search/?make=Kia&model=EV+6&...
-Page rendering: React SPA — Playwright required.
-Listing IDs: numeric, extracted from /car-{id}/ URL slugs.
+ARCHITECTURE:
+  MotorsScraper.scrape_all(searches, on_search_done, known_ids)
+    → _scrape_search()       builds Motors URL, loads ONE page
+      → _get_listing_cards()   extracts cards via _JS_EXTRACT (no detail pages)
+      → _card_to_listing()     parses each card dict into a Listing
+  Imports Listing, _jitter, _STEALTH_JS from autotrader.py.
+
+KEY GOTCHAS:
+  - Motors search filtering is unreliable — completely wrong-make cars appear
+    in results. MUST validate expected_make against listing.title after parsing.
+  - Cards are extracted by JS walking the DOM (_JS_EXTRACT block); falls back
+    to grouping by /car-{id}/ link proximity if no article containers found.
+  - Model names need URL encoding: spaces→+, see _MODEL_OVERRIDES dict.
+  - Listing IDs prefixed with 'mt_' to avoid clashing with AutoTrader IDs.
+  - Config block is still called 'autotrader' (at_cfg) — same config key reused.
+
+CONFIG KEYS: same search.autotrader block as autotrader.py.
 """
 
 import asyncio
@@ -143,7 +154,7 @@ class MotorsScraper:
                     )
                     all_listings.extend(results)
                     logger.info(
-                        f"  → {len(results)} Motors listings for {search['name']}"
+                        f"  → {len(results)} listings for {search['name']}"
                     )
                     if on_search_done and results:
                         on_search_done(results)
@@ -189,15 +200,19 @@ class MotorsScraper:
                 pass
 
         if not cards:
-            logger.info("  Motors page 1: no results")
+            logger.info("  Page 1: no results")
             return listings
 
-        logger.info(f"  Motors page 1: {len(cards)} cards")
+        logger.info(f"  Page 1: {len(cards)} cards")
+        expected_make = at_cfg.get("make", "").lower()
         for card in cards:
             if len(listings) >= self.max_per_search:
                 break
             listing = self._card_to_listing(card, search["name"])
             if not listing:
+                continue
+            if expected_make and expected_make not in listing.title.lower():
+                logger.debug(f"  Skipping wrong-make listing: {listing.title[:50]}")
                 continue
             if known_ids and listing.listing_id in known_ids:
                 continue
