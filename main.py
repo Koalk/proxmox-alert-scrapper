@@ -11,7 +11,7 @@ Usage:
     python3 main.py --quick                  # 1 listing per search, no email — fast sanity check
     python3 main.py --force-email            # send digest even if nothing new
     python3 main.py --test-email             # send a test email immediately
-    python3 main.py --autotrader-only        # skip CarGurus (faster)
+    python3 main.py --autotrader-only        # skip CarGurus and Motors (faster)
     python3 main.py --config /path/to/config.yaml
 """
 
@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from scraper.autotrader import AutoTraderScraper
 from scraper.cargurus   import CarGurusScraper
+from scraper.motors     import MotorsScraper
 from scraper.database   import ListingDatabase
 from scraper.emailer    import send_email
 
@@ -117,28 +118,28 @@ def check_for_update(install_dir: str) -> dict | None:
 def dedup_across_sources(listings: list) -> list:
     """
     Remove cross-source duplicates by matching on (price, mileage, title prefix).
-    AutoTrader listings take precedence (richer data) over CarGurus.
+    AutoTrader listings take precedence (richer data) over all other sources.
     """
-    at_listings  = [l for l in listings if l.source == "autotrader"]
-    cg_listings  = [l for l in listings if l.source == "cargurus"]
+    at_listings    = [l for l in listings if l.source == "autotrader"]
+    other_listings = [l for l in listings if l.source != "autotrader"]
 
-    at_keys = set()
+    at_keys: set = set()
     for l in at_listings:
         key = (l.price, l.mileage, l.title[:20].lower())
         at_keys.add(key)
 
-    unique_cg = []
-    for l in cg_listings:
+    unique_other = []
+    for l in other_listings:
         key = (l.price, l.mileage, l.title[:20].lower())
         if key not in at_keys:
-            unique_cg.append(l)
+            unique_other.append(l)
 
-    dupes = len(cg_listings) - len(unique_cg)
+    dupes = len(other_listings) - len(unique_other)
     if dupes:
         logging.getLogger("main").info(
-            f"Removed {dupes} cross-source duplicates"
+            f"Removed {dupes} cross-source duplicate(s)"
         )
-    return at_listings + unique_cg
+    return at_listings + unique_other
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +159,9 @@ async def main():
     parser.add_argument("--test-email", action="store_true",
         help="Send a test email immediately without scraping")
     parser.add_argument("--autotrader-only", action="store_true",
-        help="Skip CarGurus scraper (faster, less comprehensive)")
+        help="Skip CarGurus and Motors scrapers (faster, less comprehensive)")
+    parser.add_argument("--skip-motors", action="store_true",
+        help="Skip Motors.co.uk scraper only")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -238,6 +241,7 @@ async def main():
         searches_to_run = enabled
 
     all_scraped = []
+    run_errors: list[str] = []
 
     # Save each search's results to DB immediately as it completes.
     # This means a crash or restart mid-run won't lose already-scraped data —
@@ -255,9 +259,12 @@ async def main():
         all_scraped.extend(at_results)
         logger.info(f"AutoTrader total: {len(at_results)} listings")
     except Exception as exc:
-        logger.error(f"AutoTrader scraper crashed: {exc}", exc_info=True)
+        msg = f"AutoTrader scraper crashed: {exc}"
+        logger.error(msg, exc_info=True)
+        run_errors.append(msg)
 
     # --- CarGurus (optional) ---
+    cg_results: list = []
     if not args.autotrader_only:
         logger.info("--- CarGurus ---")
         try:
@@ -265,8 +272,6 @@ async def main():
                 searches_to_run, known_ids=known_ids
             )
             all_scraped.extend(cg_results)
-            # Cross-source dedup: only save CG listings that aren't already
-            # represented by an AutoTrader entry (same price+mileage+title prefix)
             unique_cg = [
                 l for l in dedup_across_sources(at_results + cg_results)
                 if l.source == "cargurus"
@@ -278,9 +283,33 @@ async def main():
                 f"({len(unique_cg)} unique after cross-source dedup)"
             )
         except Exception as exc:
-            logger.error(f"CarGurus scraper crashed: {exc}", exc_info=True)
+            msg = f"CarGurus scraper crashed: {exc}"
+            logger.error(msg, exc_info=True)
+            run_errors.append(msg)
 
-    run_errors: list[str] = []
+    # --- Motors.co.uk (optional) ---
+    if not args.autotrader_only and not getattr(args, 'skip_motors', False):
+        logger.info("--- Motors.co.uk ---")
+        try:
+            mt_results = await MotorsScraper(config).scrape_all(
+                searches_to_run, known_ids=known_ids
+            )
+            all_scraped.extend(mt_results)
+            # dedup against all previously collected listings (AT + CG)
+            unique_mt = [
+                l for l in dedup_across_sources(at_results + cg_results + mt_results)
+                if l.source == "motors"
+            ]
+            if unique_mt:
+                db.process_listings(unique_mt)
+            logger.info(
+                f"Motors total: {len(mt_results)} listings "
+                f"({len(unique_mt)} unique after cross-source dedup)"
+            )
+        except Exception as exc:
+            msg = f"Motors scraper crashed: {exc}"
+            logger.error(msg, exc_info=True)
+            run_errors.append(msg)
 
     stats = {}
     unsent = []
@@ -344,40 +373,41 @@ async def main():
         run_errors.append(msg)
 
     # --- Email ---
+    # Always send an email in production (not dry-run) so the operator
+    # always hears back from every run — even if all scrapers crashed.
     if args.dry_run:
         logger.info(f"Dry run — email skipped ({len(unsent)} unsent listings queued)")
-    elif unsent or args.force_email or run_errors:
-        if run_errors and not unsent and not args.force_email:
-            logger.info("No new listings but run had errors — sending error-only email")
-        try:
-            all_active = db.get_all_active()
-        except Exception as exc:
-            logger.warning(f"Could not fetch all_active for email (non-fatal): {exc}")
-            all_active = []
-        try:
-            update_info = check_for_update(str(Path(args.config).parent))
-        except Exception as exc:
-            logger.warning(f"Update check failed (non-fatal): {exc}")
-            update_info = None
-        max_email_listings = config.get("limits", {}).get("max_email_listings", 20)
-        logger.info(
-            f"Sending email: {len(new_listings)} new, {len(updated_listings)} price changes"
-            + (f", {len(run_errors)} error(s)" if run_errors else "")
-        )
-        ok = send_email(config, new_listings, updated_listings,
-                        all_active, stats, update_info=update_info,
-                        run_errors=run_errors if run_errors else None,
-                        max_email_listings=max_email_listings)
-        if ok:
-            if unsent:
-                db.mark_as_sent([l["listing_id"] for l in unsent])
-                logger.info(f"Email sent — {len(unsent)} listings marked as sent and data stripped")
-            else:
-                logger.info("Error-notification email sent successfully")
-        else:
-            logger.error("Email send FAILED — listings remain queued for next run")
     else:
-        logger.info("Nothing new — email skipped")
+        if not unsent and not args.force_email and not run_errors:
+            logger.info("Nothing new — email skipped")
+        else:
+            try:
+                all_active = db.get_all_active()
+            except Exception as exc:
+                logger.warning(f"Could not fetch all_active for email (non-fatal): {exc}")
+                all_active = []
+            try:
+                update_info = check_for_update(str(Path(args.config).parent))
+            except Exception as exc:
+                logger.warning(f"Update check failed (non-fatal): {exc}")
+                update_info = None
+            max_email_listings = config.get("limits", {}).get("max_email_listings", 20)
+            logger.info(
+                f"Sending email: {len(new_listings)} new, {len(updated_listings)} price changes"
+                + (f", {len(run_errors)} error(s)" if run_errors else "")
+            )
+            ok = send_email(config, new_listings, updated_listings,
+                            all_active, stats, update_info=update_info,
+                            run_errors=run_errors if run_errors else None,
+                            max_email_listings=max_email_listings)
+            if ok:
+                if unsent:
+                    db.mark_as_sent([l["listing_id"] for l in unsent])
+                    logger.info(f"Email sent — {len(unsent)} listings marked as sent and data stripped")
+                else:
+                    logger.info("Email sent (errors-only or force)")
+            else:
+                logger.error("Email send FAILED — listings remain queued for next run")
 
     logger.info(f"Run complete at {datetime.now().isoformat()}")
     logger.info("=" * 60)

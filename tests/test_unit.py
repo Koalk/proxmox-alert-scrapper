@@ -14,9 +14,11 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scraper.autotrader import build_autotrader_url, Listing
-from scraper.database import ListingDatabase
-from scraper.emailer import build_html_email
-from main import apply_defaults, check_for_update
+from scraper.cargurus  import build_cargurus_url, _get_make_model_ids
+from scraper.motors    import build_motors_url, MotorsScraper
+from scraper.database  import ListingDatabase
+from scraper.emailer   import build_html_email, _car_card
+from main import apply_defaults, check_for_update, dedup_across_sources
 
 
 # ---------------------------------------------------------------------------
@@ -503,3 +505,324 @@ class TestEmailCap:
     def test_custom_cap_respected(self):
         html = self._build(new_count=10, cap=3)
         assert "7 more listing" in html
+
+
+# ---------------------------------------------------------------------------
+# Motors.co.uk URL builder
+# ---------------------------------------------------------------------------
+
+class TestBuildMotorsUrl:
+    _CFG = {
+        "make":       "Kia",
+        "model":      "EV6",
+        "postcode":   "EH11YZ",
+        "radius":     100,
+        "price_max":  25000,
+        "mileage_max": 90000,
+        "year_from":  2021,
+    }
+
+    def test_base_url(self):
+        url = build_motors_url(self._CFG, page_num=1)
+        assert url.startswith("https://www.motors.co.uk/search/?")
+
+    def test_make_present(self):
+        url = build_motors_url(self._CFG)
+        assert "make=Kia" in url
+
+    def test_model_override_applied(self):
+        # EV6 maps to "EV+6" in _MODEL_OVERRIDES
+        url = build_motors_url(self._CFG)
+        assert "model=EV+6" in url
+
+    def test_price_and_mileage(self):
+        url = build_motors_url(self._CFG)
+        assert "price-to=25000" in url
+        assert "mileage-to=90000" in url
+
+    def test_fuel_type_electric(self):
+        url = build_motors_url(self._CFG)
+        assert "fuel-type=electric" in url
+
+    def test_sort_price_asc(self):
+        url = build_motors_url(self._CFG)
+        assert "sort=price-asc" in url
+
+    def test_page_1_no_page_param(self):
+        url = build_motors_url(self._CFG, page_num=1)
+        assert "page=" not in url
+
+    def test_page_2_has_page_param(self):
+        url = build_motors_url(self._CFG, page_num=2)
+        assert "page=2" in url
+
+    def test_ioniq5_model_override(self):
+        cfg = dict(self._CFG, make="Hyundai", model="Ioniq 5")
+        url = build_motors_url(cfg)
+        assert "model=Ioniq+5" in url
+
+    def test_no_model_override_uses_plain_name(self):
+        cfg = dict(self._CFG, model="Enyaq")
+        url = build_motors_url(cfg)
+        assert "model=Enyaq" in url
+
+
+# ---------------------------------------------------------------------------
+# CarGurus URL builder (new endpoint)
+# ---------------------------------------------------------------------------
+
+class TestBuildCarGurusUrl:
+    _CFG = {
+        "make":       "Kia",
+        "model":      "EV6",
+        "postcode":   "EH11YZ",
+        "radius":     100,
+        "price_max":  30000,
+        "mileage_max": 90000,
+        "year_from":  2021,
+    }
+
+    def test_new_endpoint(self):
+        url = build_cargurus_url(self._CFG)
+        assert "viewDetailsFilterViewInventoryListing.action" in url
+
+    def test_no_hash_fragment(self):
+        url = build_cargurus_url(self._CFG)
+        assert "#listing?" not in url
+
+    def test_make_model_ids_in_url(self):
+        url = build_cargurus_url(self._CFG)
+        assert "m306" in url    # Kia make ID
+        assert "d6251" in url   # EV6 model ID
+
+    def test_double_make_model_paths(self):
+        # makeModelTrimPaths must appear twice — once with model, once make-only
+        url = build_cargurus_url(self._CFG)
+        assert url.count("makeModelTrimPaths") == 2
+
+    def test_model_path_encoded(self):
+        url = build_cargurus_url(self._CFG)
+        assert "m306%2Fd6251" in url
+
+    def test_entity_selector(self):
+        url = build_cargurus_url(self._CFG)
+        assert "entitySelectingHelper.selectedEntity=d6251" in url
+
+    def test_max_price(self):
+        url = build_cargurus_url(self._CFG)
+        assert "maxPrice=30000" in url
+
+    def test_make_only_fallback_uses_fueltype(self):
+        cfg = dict(self._CFG, make="Hyundai", model="Ioniq 5")
+        url = build_cargurus_url(cfg)
+        assert "fuelTypes=ELECTRIC" in url
+        assert "makeModelTrimPaths=m279" in url
+        assert "makeModelTrimPaths" in url
+        assert url.count("makeModelTrimPaths") == 1
+
+    def test_unknown_make_returns_empty(self):
+        cfg = dict(self._CFG, make="UnknownMake", model="Unknown")
+        url = build_cargurus_url(cfg)
+        assert url == ""
+
+    def test_get_make_model_ids_known(self):
+        make_id, model_id = _get_make_model_ids("Kia", "EV6")
+        assert make_id == "m306"
+        assert model_id == "d6251"
+
+    def test_get_make_model_ids_make_only(self):
+        make_id, model_id = _get_make_model_ids("BMW", "iX3")
+        assert make_id == "m256"
+        assert model_id is None
+
+    def test_get_make_model_ids_unknown(self):
+        make_id, model_id = _get_make_model_ids("Lada", "Niva")
+        assert make_id is None
+        assert model_id is None
+
+
+# ---------------------------------------------------------------------------
+# Motors scraper — _card_to_listing
+# ---------------------------------------------------------------------------
+
+class TestMotorsCardToListing:
+    def _scraper(self):
+        return MotorsScraper({"limits": {}})
+
+    def _card(self, **kwargs):
+        base = {
+            "title":    "2022 Kia EV6 E GT-Line",
+            "price":    "£21,995",
+            "mileage":  "18,000 miles",
+            "location": "Edinburgh",
+            "spec":     "77kWh RWD",
+            "link":     "/car-123456789/?i=0",
+            "img":      "https://cdn.motors.co.uk/img/car.jpg",
+        }
+        base.update(kwargs)
+        return base
+
+    def test_listing_id_from_url(self):
+        s = self._scraper()
+        l = s._card_to_listing(self._card(), "Kia EV6")
+        assert l.listing_id == "mt_123456789"
+
+    def test_listing_id_fallback_no_numeric_id(self):
+        s = self._scraper()
+        l = s._card_to_listing(self._card(link="/car-search-abc/"), "Test")
+        assert l.listing_id.startswith("mt_")
+
+    def test_source_is_motors(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.source == "motors"
+
+    def test_price_parsed(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.price == 21995
+
+    def test_price_none_on_garbage(self):
+        l = self._scraper()._card_to_listing(self._card(price="POA"), "x")
+        assert l.price is None
+
+    def test_mileage_parsed(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.mileage == 18000
+
+    def test_year_extracted_from_title(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.year == 2022
+
+    def test_url_absolute(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.url.startswith("https://www.motors.co.uk")
+
+    def test_url_already_absolute(self):
+        l = self._scraper()._card_to_listing(
+            self._card(link="https://www.motors.co.uk/car-999/"), "x"
+        )
+        assert l.url == "https://www.motors.co.uk/car-999/"
+
+    def test_none_on_empty_card(self):
+        l = self._scraper()._card_to_listing({"title": "", "link": ""}, "x")
+        assert l is None
+
+    def test_high_mileage_flag(self):
+        l = self._scraper()._card_to_listing(
+            self._card(mileage="95,000 miles"), "x"
+        )
+        assert "High mileage" in l.attention_check
+
+    def test_low_mileage_flag(self):
+        l = self._scraper()._card_to_listing(
+            self._card(mileage="12,000 miles"), "x"
+        )
+        assert "Low mileage" in l.attention_check
+
+    def test_image_url_included(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.image_urls == ["https://cdn.motors.co.uk/img/car.jpg"]
+
+    def test_non_http_image_excluded(self):
+        l = self._scraper()._card_to_listing(self._card(img="data:image/gif;..."), "x")
+        assert l.image_urls == []
+
+    def test_spec_captured(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert "77kWh" in l.spec_summary
+
+
+# ---------------------------------------------------------------------------
+# dedup_across_sources
+# ---------------------------------------------------------------------------
+
+class TestDedupAcrossSources:
+    def _listing(self, source, price, mileage, title):
+        return Listing(
+            listing_id=f"{source}_{price}",
+            title=title,
+            price=price,
+            year=2022,
+            mileage=mileage,
+            location="Edinburgh",
+            distance_miles=None,
+            seller_type="dealer",
+            seller_name="Test",
+            spec_summary="",
+            url="https://example.com",
+            source=source,
+            scraped_at=datetime.utcnow().isoformat(),
+        )
+
+    def test_at_always_kept(self):
+        at = self._listing("autotrader", 20000, 30000, "Kia EV6 2022")
+        result = dedup_across_sources([at])
+        assert len(result) == 1
+        assert result[0].source == "autotrader"
+
+    def test_cg_with_same_price_mileage_title_dropped(self):
+        at = self._listing("autotrader", 20000, 30000, "Kia EV6 2022")
+        cg = self._listing("cargurus",   20000, 30000, "Kia EV6 2022")
+        result = dedup_across_sources([at, cg])
+        assert len(result) == 1
+        assert result[0].source == "autotrader"
+
+    def test_cg_with_different_price_kept(self):
+        at = self._listing("autotrader", 20000, 30000, "Kia EV6 2022")
+        cg = self._listing("cargurus",   19500, 30000, "Kia EV6 2022")
+        result = dedup_across_sources([at, cg])
+        assert len(result) == 2
+
+    def test_motors_duplicate_dropped(self):
+        at = self._listing("autotrader", 21000, 25000, "Hyundai Ioniq 5 2023")
+        mt = self._listing("motors",     21000, 25000, "Hyundai Ioniq 5 2023")
+        result = dedup_across_sources([at, mt])
+        sources = {l.source for l in result}
+        assert "autotrader" in sources
+        assert "motors" not in sources
+
+    def test_motors_unique_kept(self):
+        at = self._listing("autotrader", 21000, 25000, "Hyundai Ioniq 5 2023")
+        mt = self._listing("motors",     20000, 30000, "Hyundai Ioniq 5 2023")
+        result = dedup_across_sources([at, mt])
+        assert len(result) == 2
+
+    def test_no_at_listings_all_cg_kept(self):
+        cg1 = self._listing("cargurus", 18000, 40000, "Kia EV6 2021")
+        cg2 = self._listing("cargurus", 19000, 35000, "Kia EV6 2022")
+        result = dedup_across_sources([cg1, cg2])
+        assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# Email — source label on car card button
+# ---------------------------------------------------------------------------
+
+class TestCarCardSourceLabel:
+    def _listing_dict(self, source="autotrader"):
+        return {
+            "title":      "Test Car",
+            "price":      20000,
+            "year":       2022,
+            "mileage":    30000,
+            "location":   "Edinburgh",
+            "url":        "https://example.com",
+            "source":     source,
+            "search_name": "Test",
+            "image_urls": [],
+            "attention_check": "",
+            "distance_miles":  None,
+            "seller_name":     "",
+            "spec_summary":    "",
+        }
+
+    def test_autotrader_button_label(self):
+        html = _car_card(self._listing_dict("autotrader"))
+        assert "AutoTrader" in html
+
+    def test_cargurus_button_label(self):
+        html = _car_card(self._listing_dict("cargurus"))
+        assert "CarGurus" in html
+
+    def test_motors_button_label(self):
+        html = _car_card(self._listing_dict("motors"))
+        assert "Motors.co.uk" in html
