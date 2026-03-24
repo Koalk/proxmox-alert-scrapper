@@ -249,51 +249,100 @@ async def main():
         except Exception as exc:
             logger.error(f"CarGurus scraper crashed: {exc}", exc_info=True)
 
-    stats = db.get_stats()
+    run_errors: list[str] = []
 
-    # --- Gather unsent listings (includes leftovers from any previous crashed run) ---
-    unsent = db.get_unsent_listings()
-    new_listings     = [l for l in unsent if l.get("is_new")]
-    updated_listings = [l for l in unsent if not l.get("is_new")]
+    stats = {}
+    unsent = []
+    new_listings = []
+    updated_listings = []
 
-    db.mark_run_end(run_id, len(all_scraped), len(new_listings))
+    # --- Gather results and update DB ---
+    logger.info("--- Post-scrape: collecting results ---")
+    try:
+        stats = db.get_stats()
+        logger.info(f"DB stats: {stats['total_in_db']} total listings in database")
+    except Exception as exc:
+        msg = f"DB stats failed: {exc}"
+        logger.error(msg, exc_info=True)
+        run_errors.append(msg)
+        stats = {"total_in_db": 0}
 
-    logger.info(
-        f"Unsent: {len(new_listings)} new | {len(updated_listings)} price changes | "
-        f"Total in DB: {stats['total_in_db']}"
-    )
+    try:
+        unsent = db.get_unsent_listings()
+        new_listings     = [l for l in unsent if l.get("is_new")]
+        updated_listings = [l for l in unsent if not l.get("is_new")]
+        logger.info(
+            f"Unsent: {len(new_listings)} new | {len(updated_listings)} price changes | "
+            f"Total in DB: {stats['total_in_db']}"
+        )
+    except Exception as exc:
+        msg = f"Failed to read unsent listings from DB: {exc}"
+        logger.error(msg, exc_info=True)
+        run_errors.append(msg)
+
+    try:
+        db.mark_run_end(run_id, len(all_scraped), len(new_listings))
+    except Exception as exc:
+        logger.warning(f"mark_run_end failed (non-fatal): {exc}")
 
     # --- JSON export ---
     json_path = config.get("output", {}).get(
         "json_path", "/opt/ev-scraper/data/latest_results.json"
     )
-    Path(json_path).parent.mkdir(parents=True, exist_ok=True)
-    export = {
-        "generated_at": datetime.utcnow().isoformat(),
-        "run_stats": {
-            "total_scraped":   len(all_scraped),
-            "new_listings":    len(new_listings),
-            "price_changes":   len(updated_listings),
-            "total_in_db":     stats["total_in_db"],
-        },
-        "new_listings":         new_listings,
-        "price_changes":        updated_listings,
-        "all_current_listings": db.get_all_active(),
-    }
-    with open(json_path, "w") as f:
-        json.dump(export, f, indent=2, default=str)
-    logger.info(f"JSON written → {json_path}")
+    try:
+        logger.info(f"Writing JSON export → {json_path}")
+        Path(json_path).parent.mkdir(parents=True, exist_ok=True)
+        export = {
+            "generated_at": datetime.now().isoformat(),
+            "run_stats": {
+                "total_scraped":   len(all_scraped),
+                "new_listings":    len(new_listings),
+                "price_changes":   len(updated_listings),
+                "total_in_db":     stats["total_in_db"],
+            },
+            "new_listings":         new_listings,
+            "price_changes":        updated_listings,
+            "all_current_listings": db.get_all_active(),
+        }
+        with open(json_path, "w") as f:
+            json.dump(export, f, indent=2, default=str)
+        logger.info(f"JSON written → {json_path}")
+    except Exception as exc:
+        msg = f"JSON export failed: {exc}"
+        logger.error(msg, exc_info=True)
+        run_errors.append(msg)
 
     # --- Email ---
     if args.dry_run:
         logger.info(f"Dry run — email skipped ({len(unsent)} unsent listings queued)")
-    elif unsent or args.force_email:
-        update_info = check_for_update(str(Path(args.config).parent))
+    elif unsent or args.force_email or run_errors:
+        if run_errors and not unsent and not args.force_email:
+            logger.info("No new listings but run had errors — sending error-only email")
+        try:
+            all_active = db.get_all_active()
+        except Exception as exc:
+            logger.warning(f"Could not fetch all_active for email (non-fatal): {exc}")
+            all_active = []
+        try:
+            update_info = check_for_update(str(Path(args.config).parent))
+        except Exception as exc:
+            logger.warning(f"Update check failed (non-fatal): {exc}")
+            update_info = None
+        logger.info(
+            f"Sending email: {len(new_listings)} new, {len(updated_listings)} price changes"
+            + (f", {len(run_errors)} error(s)" if run_errors else "")
+        )
         ok = send_email(config, new_listings, updated_listings,
-                        db.get_all_active(), stats, update_info=update_info)
+                        all_active, stats, update_info=update_info,
+                        run_errors=run_errors if run_errors else None)
         if ok:
-            db.mark_as_sent([l["listing_id"] for l in unsent])
-            logger.info(f"Email sent — {len(unsent)} listings marked as sent and data stripped")
+            if unsent:
+                db.mark_as_sent([l["listing_id"] for l in unsent])
+                logger.info(f"Email sent — {len(unsent)} listings marked as sent and data stripped")
+            else:
+                logger.info("Error-notification email sent successfully")
+        else:
+            logger.error("Email send FAILED — listings remain queued for next run")
     else:
         logger.info("Nothing new — email skipped")
 

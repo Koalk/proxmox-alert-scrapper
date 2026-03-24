@@ -123,6 +123,23 @@ def _update_banner(update_info: dict) -> str:
     """
 
 
+def _error_banner(errors: list[str]) -> str:
+    items = "".join(f"<li style='margin:4px 0;'>{e}</li>" for e in errors)
+    return f"""
+    <div style="background:#fff0f0;border:1px solid #f5c6cb;border-radius:8px;
+                padding:14px 18px;margin:20px 0;">
+      <strong style="color:#c0392b;">⚠️ Run completed with errors</strong>
+      <p style="margin:6px 0 4px;color:#555;font-size:13px;">
+        The scraper encountered the following problems during this run.
+        Partial results may be incomplete.
+      </p>
+      <ul style="margin:4px 0;padding-left:18px;color:#555;font-size:13px;">
+        {items}
+      </ul>
+    </div>
+    """
+
+
 def build_html_email(
     new_listings: list,
     updated_listings: list,
@@ -130,6 +147,7 @@ def build_html_email(
     stats: dict,
     run_date: str,
     update_info: dict | None = None,
+    run_errors: list[str] | None = None,
 ) -> str:
     """Build the full HTML email body."""
 
@@ -223,6 +241,7 @@ def build_html_email(
         <tbody>{summary_rows}</tbody>
       </table>
 
+      {_error_banner(run_errors) if run_errors else ""}
       {new_section}
       {updated_section}
 
@@ -247,20 +266,23 @@ def send_email(
     stats: dict,
     subject_override: str = "",
     update_info: dict | None = None,
+    run_errors: list[str] | None = None,
 ) -> bool:
     """Send the digest email. Returns True on success."""
     email_cfg = config.get("email", {})
     subject_prefix = email_cfg.get("subject_prefix", "🚗 EV Alert")
     run_date = datetime.now().strftime("%A %d %B %Y, %H:%M")
 
+    error_tag = " ⚠️ errors" if run_errors else ""
     subject = subject_override or (
         f"{subject_prefix}: {len(new_listings)} new listing"
-        f"{'s' if len(new_listings) != 1 else ''} — {run_date}"
+        f"{'s' if len(new_listings) != 1 else ''}{error_tag} — {run_date}"
     )
 
     html_body = build_html_email(
         new_listings, updated_listings, all_listings, stats, run_date,
         update_info=update_info,
+        run_errors=run_errors,
     )
 
     msg = MIMEMultipart("alternative")
