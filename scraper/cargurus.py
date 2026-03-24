@@ -34,90 +34,81 @@ _DEAL_RATINGS = {
     "no price":   "⚪ No Price Analysis",
 }
 
-_BASE_URL = (
+# CarGurus numeric IDs for makes and specific EV models.
+# (config_make, config_model) -> (make_id, model_id)
+# model_id=None means make-only search filtered to electric via fuelTypes param.
+_MAKE_MODELS: dict[tuple, tuple] = {
+    ("Kia",        "EV6"):      ("m306", "d6251"),
+    ("Hyundai",    "Ioniq 5"):  ("m279", None),
+    ("Skoda",      "Enyaq"):    ("m207", None),
+    ("Volkswagen", "ID.3"):     ("m203", "d6006"),
+    ("Volkswagen", "ID.4"):     ("m203", None),
+    ("Volkswagen", "ID.5"):     ("m203", None),
+    ("Tesla",      "Model 3"):  ("m266", "d5176"),
+    ("Tesla",      "Model Y"):  ("m266", "d6299"),
+    ("BMW",        None):       ("m256", None),
+    ("BYD",        None):       ("m451", None),
+    ("Mercedes",   None):       ("m297", None),
+    ("Citroen",    None):       ("m263", None),
+    ("Peugeot",    None):       ("m318", None),
+}
+
+_CG_BASE = (
     "https://www.cargurus.co.uk/Cars/inventorylisting/"
     "viewDetailsFilterViewInventoryListing.action"
 )
 
-# (make_id, model_id or None)
-# model_id=None → make-only search with fuelTypes=ELECTRIC fallback
-_MAKE_MODEL_IDS: dict[tuple[str, str], tuple[str, str | None]] = {
-    ("Kia",        "EV6"):     ("m306", "d6251"),
-    ("Kia",        "EV3"):     ("m306", None),
-    ("Hyundai",    "Ioniq 5"): ("m279", None),   # model ID unconfirmed → make+fuel
-    ("Hyundai",    "Ioniq 6"): ("m279", None),
-    ("Skoda",      "Enyaq"):   ("m207", None),   # model ID unconfirmed → make+fuel
-    ("Volkswagen", "ID.3"):    ("m203", "d6006"),
-    ("Volkswagen", "ID.4"):    ("m203", None),
-    ("Volkswagen", "ID.5"):    ("m203", None),
-    ("Tesla",      "Model 3"): ("m266", "d5176"),
-    ("Tesla",      "Model Y"): ("m266", "d6299"),
-    ("BMW",        ""):        ("m256", None),
-    ("BYD",        ""):        ("m451", None),
-    ("Mercedes",   ""):        ("m297", None),
-    ("Citroen",    ""):        ("m263", None),
-    ("Peugeot",    ""):        ("m318", None),
-}
 
-# Fallback: make-only IDs for unknown (make, model) combos
-_MAKE_IDS: dict[str, str] = {
-    "Kia":        "m306",
-    "Hyundai":    "m279",
-    "Skoda":      "m207",
-    "Volkswagen": "m203",
-    "BMW":        "m256",
-    "BYD":        "m451",
-    "Tesla":      "m266",
-    "Mercedes":   "m297",
-    "Citroen":    "m263",
-    "Peugeot":    "m318",
-}
+def _get_make_model_ids(make: str, model: str) -> tuple:
+    """Return (make_id, model_id) for the given make/model config names."""
+    ids = _MAKE_MODELS.get((make, model))
+    if ids:
+        return ids
+    # Wildcard: make-only entry (model=None)
+    ids = _MAKE_MODELS.get((make, None))
+    if ids:
+        return ids[0], None
+    return None, None
 
 
 def build_cargurus_url(cfg: dict, page_num: int = 1) -> str:
     """
-    Build a CarGurus UK inventory search URL using the new
+    Build a CarGurus UK inventory search URL using the current
     viewDetailsFilterViewInventoryListing.action endpoint.
-
-    CarGurus requires makeModelTrimPaths to appear twice when a model
-    is specified: once as 'm{X}%2Fd{Y}' (make+model) and once as 'm{X}'
-    (make only). urllib urlencode handles repeated keys via a list of
-    tuples.
+    makeModelTrimPaths must appear twice when a model ID is known:
+    once as make/model path and once as make-only (CarGurus requirement).
     """
-    make  = cfg.get("make", "")
+    make = cfg.get("make", "")
     model = cfg.get("model", "")
+    make_id, model_id = _get_make_model_ids(make, model)
+    if not make_id:
+        logger.warning(
+            f"CarGurus: no ID mapping for make={make!r} — search will be skipped"
+        )
+        return ""
 
-    make_id, model_id = _MAKE_MODEL_IDS.get(
-        (make, model),
-        (_MAKE_IDS.get(make), None),
-    )
-
-    params: list[tuple[str, str]] = [
+    params: list[tuple] = [
         ("zip",               cfg.get("postcode", "EH1 1YZ").replace(" ", "")),
-        ("distance",          str(cfg.get("radius", 200))),
-        ("maxPrice",          str(cfg.get("price_max", 25000))),
-        ("maxMileage",        str(cfg.get("mileage_max", 120000))),
-        ("startYear",         str(cfg.get("year_from", 2020))),
+        ("distance",          cfg.get("radius", 200)),
+        ("maxPrice",          cfg.get("price_max", 25000)),
+        ("maxMileage",        cfg.get("mileage_max", 120000)),
+        ("startYear",         cfg.get("year_from", 2020)),
         ("sortDir",           "ASC"),
         ("sortType",          "PRICE"),
-        ("isDeliveryEnabled", "true"),
         ("srpVariation",      "DEFAULT_SEARCH"),
+        ("isDeliveryEnabled", "true"),
+        ("offset",            (page_num - 1) * 15),
     ]
-
-    if page_num > 1:
-        params.append(("startIndex", str((page_num - 1) * 15)))
-
-    if make_id and model_id:
+    if model_id:
+        # makeModelTrimPaths must appear twice for model-scoped searches
         params.append(("makeModelTrimPaths", f"{make_id}/{model_id}"))
         params.append(("makeModelTrimPaths", make_id))
         params.append(("entitySelectingHelper.selectedEntity", model_id))
-    elif make_id:
-        params.append(("makeModelTrimPaths", make_id))
-        params.append(("fuelTypes",          "ELECTRIC"))
     else:
+        params.append(("makeModelTrimPaths", make_id))
         params.append(("fuelTypes", "ELECTRIC"))
 
-    return _BASE_URL + "?" + urlencode(params)
+    return _CG_BASE + "?" + urlencode(params)
 
 
 class CarGurusScraper:
@@ -258,14 +249,15 @@ class CarGurusScraper:
         container then extract key info from each card without visiting
         individual detail pages (saves significant time and resources).
         """
-        # networkidle waits for the React app to finish its initial data fetch.
-        # Fall back to domcontentloaded + extra sleep on timeout.
+        # Use networkidle so the React SPA has time to fetch and render
+        # listings driven by hash-fragment params.  Fall back to a plain
+        # load if networkidle times out (can happen on slow connections).
         try:
             await page.goto(url, timeout=self.timeout, wait_until="networkidle")
         except PWTimeout:
             logger.warning("  CarGurus: networkidle timed out, retrying with domcontentloaded")
             await page.goto(url, timeout=self.timeout, wait_until="domcontentloaded")
-            await asyncio.sleep(3)
+            await asyncio.sleep(3)   # give the SPA a moment to render
 
         # Log what we actually landed on — helps spot redirects / captchas
         try:
@@ -305,40 +297,73 @@ class CarGurusScraper:
 
         # Extract listing data from card elements.
         # page.evaluate() has no built-in timeout — wrap it ourselves.
-        # Selectors target the new inventory listing page structure (2025+).
         _JS_EXTRACT = """
         () => {
             const results = [];
-            // Primary: new structured listing cards
-            const containers = document.querySelectorAll(
-                '[data-cg-ft="car-blade"], '
-                + '[class*="CarCard"], '
-                + '[class*="listing-row"], '
-                + '[data-testid*="listing"], '
-                + 'li[class*="result"]'
-            );
+
+            // Try primary container selectors for different CarGurus page versions
+            const containerSelectors = [
+                '[data-cg-ft="car-blade"]',
+                '[class*="CarCard"]',
+                '[class*="car-blade"]',
+                '[class*="listingCard"]',
+                '[class*="listing-row"]',
+                '[class*="car-listing"]',
+            ];
+            let containers = [];
+            for (const sel of containerSelectors) {
+                const found = Array.from(document.querySelectorAll(sel));
+                if (found.length > 0) { containers = found; break; }
+            }
+
+            // Fallback: walk up from VDP links to find per-card containers
+            if (containers.length === 0) {
+                const vdpLinks = document.querySelectorAll(
+                    'a[href*="listingId="], a[href*="/usedcars/"]'
+                );
+                const seen = new Set();
+                vdpLinks.forEach(a => {
+                    let el = a.parentElement;
+                    for (let i = 0; i < 8; i++) {
+                        if (!el || el === document.body) break;
+                        const inner = el.querySelectorAll(
+                            'a[href*="listingId="], a[href*="/usedcars/"]'
+                        );
+                        if (inner.length === 1 && !seen.has(el)) {
+                            seen.add(el);
+                            containers.push(el);
+                            break;
+                        }
+                        el = el.parentElement;
+                    }
+                });
+            }
+
             containers.forEach(el => {
-                const getText = (sel) => {
-                    const e = el.querySelector(sel);
-                    return e ? e.innerText.trim() : '';
+                const g = (...sels) => {
+                    for (const s of sels) {
+                        const e = el.querySelector(s);
+                        if (e && e.innerText.trim()) return e.innerText.trim();
+                    }
+                    return '';
                 };
-                const getAttr = (sel, attr) => {
-                    const e = el.querySelector(sel);
-                    return e ? e.getAttribute(attr) : '';
-                };
-                const title    = getText('h4, h3, h2, [class*="title"]');
-                const price    = getText('[class*="price"], [data-cg-ft="price"]');
-                const mileage  = getText('[class*="mileage"], [class*="miles"]');
-                const location = getText('[class*="dealer-name"], [class*="location"], [class*="seller"]');
-                const deal     = getText('[class*="deal-rating"], [class*="priceAnalysis"], [class*="dealScore"]');
-                // Links go to /Cars/inventorylisting/vdp.action?listingId=NNNNN
-                const link     = getAttr('a[href*="listingId"]', 'href') ||
-                                 getAttr('a[href*="vdp.action"]', 'href') ||
-                                 getAttr('a', 'href');
-                const img      = getAttr('img[src*="vehicleimage"]', 'src') ||
-                                 getAttr('img[src*="cargurus"]', 'src') ||
-                                 getAttr('img', 'src');
-                if (title || price) {
+                const title    = g('h4','h3','h2',
+                                   '[class*="title"]','[class*="Title"]');
+                const price    = g('[class*="price"]','[class*="Price"]',
+                                   '[data-cg-ft="price"]');
+                const mileage  = g('[class*="mileage"]','[class*="Mileage"]',
+                                   '[class*="miles"]');
+                const location = g('[class*="dealer-name"]','[class*="location"]',
+                                   '[class*="Location"]','[class*="dealer"]');
+                const deal     = g('[class*="deal-rating"]','[class*="DealRating"]',
+                                   '[class*="priceAnalysis"]','[class*="dealRating"]');
+                const linkEl   = el.querySelector('a[href*="listingId="]')
+                               || el.querySelector('a[href*="/usedcars/"]')
+                               || el.querySelector('a[href]');
+                const link     = linkEl ? linkEl.getAttribute('href') : '';
+                const imgEl    = el.querySelector('img[src], img[data-src]');
+                const img      = imgEl ? (imgEl.src || imgEl.dataset.src || '') : '';
+                if (title || link) {
                     results.push({title, price, mileage, location, deal, link, img});
                 }
             });
@@ -354,7 +379,8 @@ class CarGurusScraper:
             logger.debug(f"CarGurus card extraction error: {exc}")
 
         if not cards:
-            # Diagnostic: log what elements are present so we can tune selectors.
+            # Diagnostic: log how many matching elements Playwright can see
+            # so we know whether the selectors are wrong vs the page is empty.
             try:
                 counts = await asyncio.wait_for(
                     page.evaluate("""
@@ -362,11 +388,9 @@ class CarGurusScraper:
                         blade:     document.querySelectorAll('[data-cg-ft="car-blade"]').length,
                         carcard:   document.querySelectorAll('[class*="CarCard"]').length,
                         row:       document.querySelectorAll('[class*="listing-row"]').length,
-                        testid:    document.querySelectorAll('[data-testid*="listing"]').length,
-                        result_li: document.querySelectorAll('li[class*="result"]').length,
-                        all_links: document.querySelectorAll('a[href*="listingId"]').length,
+                        vdp_links: document.querySelectorAll('a[href*="listingId="]').length,
+                        car_links: document.querySelectorAll('a[href*="/usedcars/"]').length,
                         body_len:  document.body ? document.body.innerText.length : 0,
-                        title:     document.title,
                     })
                     """),
                     timeout=5,
@@ -374,11 +398,8 @@ class CarGurusScraper:
                 logger.info(
                     f"  CarGurus selector counts: "
                     f"blade={counts.get('blade')}, carcard={counts.get('carcard')}, "
-                    f"row={counts.get('row')}, testid={counts.get('testid')}, "
-                    f"result_li={counts.get('result_li')}, "
-                    f"listing_links={counts.get('all_links')}, "
-                    f"body_chars={counts.get('body_len')}, "
-                    f"page_title={counts.get('title')!r}"
+                    f"row={counts.get('row')}, vdp_links={counts.get('vdp_links')}, "
+                    f"car_links={counts.get('car_links')}, body_chars={counts.get('body_len')}"
                 )
             except Exception:
                 pass
@@ -435,17 +456,12 @@ class CarGurusScraper:
         if mileage and mileage < 25000:
             flags.append("✅ Low mileage")
 
-        # Listing ID: extract integer listingId from URL, or fall back to
-        # the hash fragment from the old format, or use a title hash.
-        listing_id = ""
+        # Stable ID: prefer numeric listingId from VDP URL
+        listing_id: str
         if link:
-            m_id = re.search(r"listingId=?(\d+)", link)
-            if not m_id:
-                # Older-format hash fragment: #listing=156913750/...
-                m_id = re.search(r"#listing=(\d+)", link)
-            if m_id:
-                listing_id = "cg_" + m_id.group(1)
-        if not listing_id:
+            m = re.search(r"listingId=(\d+)", link)
+            listing_id = "cg_" + (m.group(1) if m else re.sub(r"[^\w]", "", link)[-20:])
+        else:
             listing_id = "cg_" + re.sub(r"\s+", "_", title[:30])
 
         return Listing(

@@ -73,12 +73,11 @@ class TestCarGurusIntegration:
         _p(f"\nBuilt URL: {url}")
         assert "cargurus.co.uk" in url
         assert "viewDetailsFilterViewInventoryListing.action" in url
-        # Kia EV6 has a confirmed model ID
-        assert "m306" in url
-        assert "d6251" in url
         assert "maxPrice=30000" in url
-        assert "sortType=PRICE" in url
-        assert "isDeliveryEnabled=true" in url
+        assert "makeModelTrimPaths" in url
+        assert "m306" in url          # Kia make ID
+        assert "d6251" in url         # EV6 model ID
+        assert "#listing?" not in url, "Old hash-fragment URL format should not be used"
 
     # --- Live page diagnostics ---
 
@@ -126,10 +125,8 @@ class TestCarGurusIntegration:
                     blade:        document.querySelectorAll('[data-cg-ft="car-blade"]').length,
                     carcard:      document.querySelectorAll('[class*="CarCard"]').length,
                     row:          document.querySelectorAll('[class*="listing-row"]').length,
-                    testid:       document.querySelectorAll('[data-testid*="listing"]').length,
-                    result_li:    document.querySelectorAll('li[class*="result"]').length,
-                    listing_a:    document.querySelectorAll('a[href*="listingId"]').length,
-                    vdp_a:        document.querySelectorAll('a[href*="vdp.action"]').length,
+                    usedcars_a:   document.querySelectorAll('a[href*="/usedcars/"]').length,
+                    listing_a:    document.querySelectorAll('a[href*="listing"]').length,
                     all_classes:  Array.from(new Set(
                                     Array.from(document.querySelectorAll('[class]'))
                                          .flatMap(e => Array.from(e.classList))
@@ -140,10 +137,9 @@ class TestCarGurusIntegration:
                 })
                 """)
                 _p(f"  Counts    : blade={counts['blade']}, carcard={counts['carcard']}, "
-                   f"row={counts['row']}, testid={counts['testid']}, "
-                   f"result_li={counts['result_li']}, "
-                   f"listing_links={counts['listing_a']}, vdp_links={counts['vdp_a']}, "
-                   f"h4={counts['h4_count']}, body_chars={counts['body_chars']}")
+                   f"row={counts['row']}, usedcars_links={counts['usedcars_a']}, "
+                   f"listing_links={counts['listing_a']}, h4={counts['h4_count']}, "
+                   f"body_chars={counts['body_chars']}")
                 _p(f"  Relevant classes: {counts['all_classes']}")
 
                 body_text = await page.evaluate(
