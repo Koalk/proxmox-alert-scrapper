@@ -153,13 +153,13 @@ class AutoTraderScraper:
                     logger.info(f"Skipping disabled search: {search['name']}")
                     continue
                 logger.info(
-                    f"[{i+1}/{len(searches)}] Starting: {search['name']}"
+                    f"[AutoTrader {i+1}/{len(searches)}] {search['name']}"
                 )
                 try:
                     results = await self._scrape_search(context, search, known_ids=known_ids)
                     all_listings.extend(results)
                     logger.info(
-                        f"  → {len(results)} listings kept for {search['name']}"
+                        f"  → {len(results)} listings for {search['name']}"
                     )
                     if on_search_done is not None:
                         try:

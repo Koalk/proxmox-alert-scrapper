@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 main.py — EV Car Alert Scraper
-Entry point. Loads config, runs AutoTrader + CarGurus scrapers,
+Entry point. Loads config, runs AutoTrader + Motors.co.uk scrapers,
 deduplicates results, updates SQLite DB, sends HTML email digest,
 and writes latest_results.json.
 
@@ -11,7 +11,7 @@ Usage:
     python3 main.py --quick                  # 1 listing per search, no email — fast sanity check
     python3 main.py --force-email            # send digest even if nothing new
     python3 main.py --test-email             # send a test email immediately
-    python3 main.py --autotrader-only        # skip CarGurus and Motors (faster)
+    python3 main.py --skip-motors            # skip Motors.co.uk scraper
     python3 main.py --config /path/to/config.yaml
 """
 
@@ -29,7 +29,6 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent))
 
 from scraper.autotrader import AutoTraderScraper
-from scraper.cargurus   import CarGurusScraper
 from scraper.motors     import MotorsScraper
 from scraper.database   import ListingDatabase
 from scraper.emailer    import send_email
@@ -158,10 +157,8 @@ async def main():
         help="Send email even if no new listings")
     parser.add_argument("--test-email", action="store_true",
         help="Send a test email immediately without scraping")
-    parser.add_argument("--autotrader-only", action="store_true",
-        help="Skip CarGurus and Motors scrapers (faster, less comprehensive)")
     parser.add_argument("--skip-motors", action="store_true",
-        help="Skip Motors.co.uk scraper only")
+        help="Skip Motors.co.uk scraper")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -263,41 +260,17 @@ async def main():
         logger.error(msg, exc_info=True)
         run_errors.append(msg)
 
-    # --- CarGurus (optional) ---
-    cg_results: list = []
-    if not args.autotrader_only:
-        logger.info("--- CarGurus ---")
-        try:
-            cg_results = await CarGurusScraper(config).scrape_all(
-                searches_to_run, known_ids=known_ids
-            )
-            all_scraped.extend(cg_results)
-            unique_cg = [
-                l for l in dedup_across_sources(at_results + cg_results)
-                if l.source == "cargurus"
-            ]
-            if unique_cg:
-                db.process_listings(unique_cg)
-            logger.info(
-                f"CarGurus total: {len(cg_results)} listings "
-                f"({len(unique_cg)} unique after cross-source dedup)"
-            )
-        except Exception as exc:
-            msg = f"CarGurus scraper crashed: {exc}"
-            logger.error(msg, exc_info=True)
-            run_errors.append(msg)
-
     # --- Motors.co.uk (optional) ---
-    if not args.autotrader_only and not getattr(args, 'skip_motors', False):
+    if not args.skip_motors:
         logger.info("--- Motors.co.uk ---")
         try:
             mt_results = await MotorsScraper(config).scrape_all(
                 searches_to_run, known_ids=known_ids
             )
             all_scraped.extend(mt_results)
-            # dedup against all previously collected listings (AT + CG)
+            # dedup against AT listings
             unique_mt = [
-                l for l in dedup_across_sources(at_results + cg_results + mt_results)
+                l for l in dedup_across_sources(at_results + mt_results)
                 if l.source == "motors"
             ]
             if unique_mt:
