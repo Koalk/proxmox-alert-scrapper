@@ -148,14 +148,24 @@ def build_html_email(
     run_date: str,
     update_info: dict | None = None,
     run_errors: list[str] | None = None,
+    max_email_listings: int = 20,
 ) -> str:
     """Build the full HTML email body."""
 
+    # Cap total car cards shown to max_email_listings (new listings take priority)
+    new_to_show     = new_listings[:max_email_listings]
+    remaining_slots = max(0, max_email_listings - len(new_to_show))
+    updated_to_show = updated_listings[:remaining_slots]
+    total_omitted   = (
+        (len(new_listings) - len(new_to_show))
+        + (len(updated_listings) - len(updated_to_show))
+    )
+
     new_section = ""
-    if new_listings:
+    if new_to_show:
         cards = "".join(
             _car_card(l.to_dict() if hasattr(l, "to_dict") else l, "🆕 New")
-            for l in new_listings
+            for l in new_to_show
         )
         new_section = f"""
         <h2 style="color:#155724;border-bottom:2px solid #28a745;
@@ -174,13 +184,13 @@ def build_html_email(
         """
 
     updated_section = ""
-    if updated_listings:
+    if updated_to_show:
         cards = "".join(
             _car_card(
                 l.to_dict() if hasattr(l, "to_dict") else l,
                 "💲 Price Changed"
             )
-            for l in updated_listings
+            for l in updated_to_show
         )
         updated_section = f"""
         <h2 style="color:#856404;border-bottom:2px solid #ffc107;
@@ -189,6 +199,18 @@ def build_html_email(
         </h2>
         {cards}
         """
+
+    overflow_note = ""
+    if total_omitted > 0:
+        overflow_note = f"""
+    <div style="background:#f0f4ff;border:1px solid #c5d0f5;border-radius:8px;
+                padding:12px 18px;margin:16px 0;font-size:13px;color:#555;">
+      ℹ️ <strong>{total_omitted} more listing(s)</strong> not shown here to keep
+      the email readable. The full list is saved in
+      <code>latest_results.json</code> — pass it to an AI assistant to find
+      hidden gems.
+    </div>
+    """
 
     # Summary table by search
     from collections import defaultdict
@@ -244,6 +266,7 @@ def build_html_email(
       {_error_banner(run_errors) if run_errors else ""}
       {new_section}
       {updated_section}
+      {overflow_note}
 
       {_update_banner(update_info) if update_info else ""}
 
@@ -267,6 +290,7 @@ def send_email(
     subject_override: str = "",
     update_info: dict | None = None,
     run_errors: list[str] | None = None,
+    max_email_listings: int = 20,
 ) -> bool:
     """Send the digest email. Returns True on success."""
     email_cfg = config.get("email", {})
@@ -283,6 +307,7 @@ def send_email(
         new_listings, updated_listings, all_listings, stats, run_date,
         update_info=update_info,
         run_errors=run_errors,
+        max_email_listings=max_email_listings,
     )
 
     msg = MIMEMultipart("alternative")

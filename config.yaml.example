@@ -28,9 +28,10 @@ limits:
   scroll_pause_ms: 1500        # pause between scrolls (be polite to sites)
   request_delay_ms: 3000       # pause between listings within a search
   search_delay_ms: 8000        # pause between different searches
-  max_pages_per_search: 2      # results are sorted price-asc, so page 1-2 = cheapest
-  max_listings_per_search: 20  # the 20 cheapest matching listings per search
+  max_pages_per_search: 2      # fallback depth: if page 1 is all already-known, try page 2
+  max_listings_per_search: 20  # the 20 cheapest matching listings per search (one page only)
   max_images_per_listing: 3    # images to embed in email per car
+  max_email_listings: 20       # total car cards shown in the email (oldest excess → JSON only)
 
 # --- Database ---
 database:

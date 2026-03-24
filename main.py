@@ -200,6 +200,11 @@ async def main():
     db     = ListingDatabase(db_path)
     run_id = db.mark_run_start()
 
+    # Collect known listing IDs so scrapers can skip pages where every result
+    # is already in the DB (they'll try the next page instead).
+    # Disabled in --quick mode: that's a sanity check, always scrape page 1.
+    known_ids = None if args.quick else db.get_known_listing_ids()
+
     searches = config.get("searches", [])
     enabled  = [s for s in searches if s.get("enabled", True)]
     enabled  = apply_defaults(enabled, config.get("defaults", {}))
@@ -245,7 +250,7 @@ async def main():
     at_results = []
     try:
         at_results = await AutoTraderScraper(config).scrape_all(
-            searches_to_run, on_search_done=_save_partial
+            searches_to_run, on_search_done=_save_partial, known_ids=known_ids
         )
         all_scraped.extend(at_results)
         logger.info(f"AutoTrader total: {len(at_results)} listings")
@@ -256,7 +261,9 @@ async def main():
     if not args.autotrader_only:
         logger.info("--- CarGurus ---")
         try:
-            cg_results = await CarGurusScraper(config).scrape_all(searches_to_run)
+            cg_results = await CarGurusScraper(config).scrape_all(
+                searches_to_run, known_ids=known_ids
+            )
             all_scraped.extend(cg_results)
             # Cross-source dedup: only save CG listings that aren't already
             # represented by an AutoTrader entry (same price+mileage+title prefix)
@@ -352,13 +359,15 @@ async def main():
         except Exception as exc:
             logger.warning(f"Update check failed (non-fatal): {exc}")
             update_info = None
+        max_email_listings = config.get("limits", {}).get("max_email_listings", 20)
         logger.info(
             f"Sending email: {len(new_listings)} new, {len(updated_listings)} price changes"
             + (f", {len(run_errors)} error(s)" if run_errors else "")
         )
         ok = send_email(config, new_listings, updated_listings,
                         all_active, stats, update_info=update_info,
-                        run_errors=run_errors if run_errors else None)
+                        run_errors=run_errors if run_errors else None,
+                        max_email_listings=max_email_listings)
         if ok:
             if unsent:
                 db.mark_as_sent([l["listing_id"] for l in unsent])

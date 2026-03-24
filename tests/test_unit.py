@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scraper.autotrader import build_autotrader_url, Listing
 from scraper.database import ListingDatabase
+from scraper.emailer import build_html_email
 from main import apply_defaults, check_for_update
 
 
@@ -374,3 +375,131 @@ class TestCheckForUpdate:
         # No valid git repo — git commands will fail, should return None gracefully
         result = check_for_update(str(tmp))
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# ListingDatabase — get_known_listing_ids
+# ---------------------------------------------------------------------------
+
+class TestGetKnownListingIds:
+    def _db(self):
+        tmp = tempfile.mkdtemp()
+        return ListingDatabase(f"{tmp}/test.db")
+
+    def _listing(self, listing_id, search_name="Test"):
+        return Listing(
+            listing_id=listing_id, title="Kia EV6 2022", price=18000,
+            year=2022, mileage=30000, location="Edinburgh", distance_miles=5,
+            seller_type="dealer", seller_name="EV Cars Ltd",
+            spec_summary="Auto | Electric", url="https://example.com",
+            search_name=search_name,
+        )
+
+    def test_empty_db_returns_empty_set(self):
+        db = self._db()
+        assert db.get_known_listing_ids() == set()
+
+    def test_returns_all_stored_ids(self):
+        db = self._db()
+        db.process_listings([self._listing("A1"), self._listing("B2"), self._listing("C3")])
+        ids = db.get_known_listing_ids()
+        assert ids == {"A1", "B2", "C3"}
+
+    def test_returns_ids_regardless_of_email_sent_status(self):
+        """IDs of already-sent listings must still appear so pages can be skipped."""
+        db = self._db()
+        db.process_listings([self._listing("SENT1"), self._listing("UNSENT2")])
+        db.mark_as_sent(["SENT1"])
+        ids = db.get_known_listing_ids()
+        assert "SENT1" in ids
+        assert "UNSENT2" in ids
+
+    def test_duplicate_process_does_not_duplicate_ids(self):
+        """Processing the same listing twice should still yield one ID entry."""
+        db = self._db()
+        listing = self._listing("DUP1")
+        db.process_listings([listing])
+        db.process_listings([listing])
+        ids = db.get_known_listing_ids()
+        assert ids == {"DUP1"}
+
+    def test_returns_set_not_list(self):
+        db = self._db()
+        db.process_listings([self._listing("X1")])
+        assert isinstance(db.get_known_listing_ids(), set)
+
+
+# ---------------------------------------------------------------------------
+# emailer — max_email_listings cap
+# ---------------------------------------------------------------------------
+
+class TestEmailCap:
+    """Tests for the max_email_listings cap in build_html_email."""
+
+    def _listing_dict(self, listing_id, title="Kia EV6 2022", price=18000, is_new=1):
+        return {
+            "listing_id": listing_id,
+            "title": title,
+            "price": price,
+            "year": 2022,
+            "mileage": 30000,
+            "location": "Edinburgh",
+            "distance_miles": 5,
+            "seller_type": "dealer",
+            "seller_name": "EV Cars Ltd",
+            "spec_summary": "Auto | Electric",
+            "url": "https://example.com",
+            "source": "autotrader",
+            "image_urls": [],
+            "attention_check": "",
+            "search_name": "Test Search",
+            "is_new": is_new,
+        }
+
+    def _build(self, new_count=0, updated_count=0, cap=20):
+        new = [self._listing_dict(f"N{i}") for i in range(new_count)]
+        updated = [self._listing_dict(f"U{i}", is_new=0) for i in range(updated_count)]
+        return build_html_email(
+            new_listings=new,
+            updated_listings=updated,
+            all_listings=new + updated,
+            stats={"total_in_db": new_count + updated_count},
+            run_date="Monday 24 March 2026, 02:00",
+            max_email_listings=cap,
+        )
+
+    def test_under_cap_shows_all_listings(self):
+        html = self._build(new_count=5, cap=20)
+        # 5 listing titles should all appear
+        for i in range(5):
+            assert f"N{i}" in html or "Kia EV6" in html  # cards rendered
+
+    def test_over_cap_shows_overflow_note(self):
+        html = self._build(new_count=25, cap=20)
+        assert "more listing" in html.lower()
+        assert "latest_results.json" in html
+
+    def test_exactly_at_cap_no_overflow_note(self):
+        html = self._build(new_count=20, cap=20)
+        assert "more listing" not in html.lower()
+
+    def test_new_listings_take_priority_over_updated(self):
+        """With cap=5 and 5 new + 3 updated, all 5 new shown, 0 updated."""
+        html = self._build(new_count=5, updated_count=3, cap=5)
+        # Overflow note should indicate 3 omitted
+        assert "3 more listing" in html
+        # Updated section should not appear (0 slots left)
+        assert "Price Changes" not in html
+
+    def test_remaining_slots_fill_with_updated(self):
+        """With cap=8 and 5 new + 5 updated, 5 new + 3 updated shown, 2 omitted."""
+        html = self._build(new_count=5, updated_count=5, cap=8)
+        assert "2 more listing" in html
+
+    def test_zero_new_zero_updated_no_overflow(self):
+        html = self._build(new_count=0, updated_count=0, cap=20)
+        assert "more listing" not in html.lower()
+
+    def test_custom_cap_respected(self):
+        html = self._build(new_count=10, cap=3)
+        assert "7 more listing" in html

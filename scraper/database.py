@@ -182,6 +182,12 @@ class ListingDatabase:
                 result.append(d)
             return result
 
+    def get_known_listing_ids(self) -> set[str]:
+        """Return all listing IDs currently stored in the database."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT listing_id FROM listings").fetchall()
+            return {row[0] for row in rows}
+
     def get_searches_with_recent_unsent(self, max_age_hours: int = 20) -> set[str]:
         """
         Return search names that have unsent listings scraped within the last

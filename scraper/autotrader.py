@@ -107,7 +107,7 @@ class AutoTraderScraper:
     # Public
     # ------------------------------------------------------------------
 
-    async def scrape_all(self, searches: list, on_search_done=None) -> list:
+    async def scrape_all(self, searches: list, on_search_done=None, known_ids=None) -> list:
         """Run all enabled searches sequentially, single browser instance."""
         all_listings = []
         async with async_playwright() as p:
@@ -156,7 +156,7 @@ class AutoTraderScraper:
                     f"[{i+1}/{len(searches)}] Starting: {search['name']}"
                 )
                 try:
-                    results = await self._scrape_search(context, search)
+                    results = await self._scrape_search(context, search, known_ids=known_ids)
                     all_listings.extend(results)
                     logger.info(
                         f"  → {len(results)} listings kept for {search['name']}"
@@ -185,15 +185,23 @@ class AutoTraderScraper:
     # Private: search page → listing URLs
     # ------------------------------------------------------------------
 
-    async def _scrape_search(self, context: BrowserContext, search: dict) -> list:
+    async def _scrape_search(
+        self, context: BrowserContext, search: dict, known_ids: set | None = None
+    ) -> list:
         listings = []
         at_cfg   = search["autotrader"]
         require  = [k.lower() for k in search.get("require_keywords", [])]
         exclude  = [k.lower() for k in search.get("exclude_keywords", [])]
         page_num = 1
         scrapes  = 0
+        _id_re   = re.compile(r"/car-details/(\d+)")
 
-        while len(listings) < self.max_per_search:
+        # Walk pages until we find one that contains at least one unknown listing,
+        # then scrape that page (up to max_per_search) and stop.
+        # This means we only ever visit ONE page of results per search — the very
+        # first page where new listings exist. If page 1 is entirely familiar
+        # (all IDs already in the DB), we try page 2, and so on up to max_pages.
+        while True:
             if page_num > self.max_pages:
                 logger.info(
                     f"  Page limit ({self.max_pages}) reached — stopping pagination"
@@ -218,10 +226,26 @@ class AutoTraderScraper:
                 logger.info(f"  Page {page_num}: no results — stopping pagination")
                 break
 
-            logger.info(
-                f"  Page {page_num}: {len(listing_urls)} URLs found"
-            )
+            logger.info(f"  Page {page_num}: {len(listing_urls)} URLs found")
 
+            # If a known-IDs set was supplied, skip pages where every result is
+            # already in the database — those listings won't produce anything new.
+            if known_ids is not None:
+                page_ids = set()
+                for u in listing_urls:
+                    m = _id_re.search(u)
+                    if m:
+                        page_ids.add(m.group(1))
+                if page_ids and page_ids.issubset(known_ids):
+                    logger.info(
+                        f"  Page {page_num}: all {len(page_ids)} results already in DB "
+                        f"— checking page {page_num + 1} for new listings"
+                    )
+                    page_num += 1
+                    continue
+
+            # Scrape this page's listings (up to max_per_search), then stop.
+            # We only ever want one page of results per search.
             for url_idx, listing_url in enumerate(listing_urls):
                 if len(listings) >= self.max_per_search:
                     break
@@ -261,7 +285,8 @@ class AutoTraderScraper:
                         pass
                 await asyncio.sleep(_jitter(self.request_delay))
 
-            page_num += 1
+            # Always stop after scraping one page — one page per search
+            break
 
         return listings
 
