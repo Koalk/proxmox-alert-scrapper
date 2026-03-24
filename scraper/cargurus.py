@@ -84,13 +84,16 @@ class CarGurusScraper:
     def __init__(self, config: dict):
         self.config = config
         lim = config.get("limits", {})
-        self.timeout        = lim.get("page_timeout_ms", 35000)
-        self.scroll_pause   = lim.get("scroll_pause_ms", 1500) / 1000
-        self.request_delay  = lim.get("request_delay_ms", 3500) / 1000
-        self.search_delay   = lim.get("search_delay_ms", 10000) / 1000
-        self.max_per_search = lim.get("max_listings_per_search", 40)
-        self.max_images     = lim.get("max_images_per_listing", 3)
-        self._cookie_done   = False
+        self.timeout         = lim.get("page_timeout_ms", 35000)
+        self.scroll_pause    = lim.get("scroll_pause_ms", 1500) / 1000
+        self.request_delay   = lim.get("request_delay_ms", 3500) / 1000
+        self.search_delay    = lim.get("search_delay_ms", 10000) / 1000
+        self.max_per_search  = lim.get("max_listings_per_search", 20)
+        self.max_images      = lim.get("max_images_per_listing", 3)
+        # Hard ceiling on any single search — prevents one hung page freezing
+        # the entire run. Default 4 minutes; CarGurus pages can be slow.
+        self.search_timeout  = lim.get("cargurus_search_timeout_s", 240)
+        self._cookie_done    = False
 
     async def scrape_all(self, searches: list, on_search_done=None, known_ids=None) -> list:
         """Run all enabled searches sequentially."""
@@ -130,15 +133,26 @@ class CarGurusScraper:
                     f"[CarGurus {i+1}/{len(searches)}] {search['name']}"
                 )
                 try:
-                    results = await self._scrape_search(context, search)
+                    results = await asyncio.wait_for(
+                        self._scrape_search(context, search),
+                        timeout=self.search_timeout,
+                    )
                     all_listings.extend(results)
                     logger.info(
                         f"  → {len(results)} CarGurus listings for {search['name']}"
                     )
                     if on_search_done and results:
                         on_search_done(results)
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"CarGurus search '{search['name']}' timed out after "
+                        f"{self.search_timeout}s — skipping"
+                    )
                 except Exception as exc:
-                    logger.error(f"CarGurus search failed: {exc}", exc_info=True)
+                    logger.error(
+                        f"CarGurus search '{search['name']}' failed: {exc}",
+                        exc_info=True,
+                    )
                 if i < len(searches) - 1:
                     await asyncio.sleep(_jitter(self.search_delay))
 
@@ -198,7 +212,23 @@ class CarGurusScraper:
         container then extract key info from each card without visiting
         individual detail pages (saves significant time and resources).
         """
-        await page.goto(url, timeout=self.timeout, wait_until="domcontentloaded")
+        # Use networkidle so the React SPA has time to fetch and render
+        # listings driven by hash-fragment params.  Fall back to a plain
+        # load if networkidle times out (can happen on slow connections).
+        try:
+            await page.goto(url, timeout=self.timeout, wait_until="networkidle")
+        except PWTimeout:
+            logger.warning("  CarGurus: networkidle timed out, retrying with domcontentloaded")
+            await page.goto(url, timeout=self.timeout, wait_until="domcontentloaded")
+            await asyncio.sleep(3)   # give the SPA a moment to render
+
+        # Log what we actually landed on — helps spot redirects / captchas
+        try:
+            page_title = await asyncio.wait_for(page.title(), timeout=5)
+            logger.debug(f"  CarGurus page title: {page_title!r}  url: {page.url[:100]}")
+        except Exception:
+            pass
+
         await asyncio.sleep(_jitter(1.5))
 
         # Dismiss cookie banner
@@ -219,47 +249,77 @@ class CarGurusScraper:
                 except Exception:
                     pass
 
-        # Scroll to load lazy listings
+        # Scroll to load lazy listings — each keyboard press bounded so a
+        # hung page can't block the whole run indefinitely.
         for _ in range(4):
-            await page.keyboard.press("End")
+            try:
+                await asyncio.wait_for(page.keyboard.press("End"), timeout=5)
+            except (asyncio.TimeoutError, Exception):
+                break
             await asyncio.sleep(_jitter(self.scroll_pause))
 
-        # Extract listing data from card elements
+        # Extract listing data from card elements.
+        # page.evaluate() has no built-in timeout — wrap it ourselves.
+        _JS_EXTRACT = """
+        () => {
+            const results = [];
+            const containers = document.querySelectorAll(
+                '[data-cg-ft="car-blade"], [class*="CarCard"], [class*="listing-row"]'
+            );
+            containers.forEach(el => {
+                const getText = (sel) => {
+                    const e = el.querySelector(sel);
+                    return e ? e.innerText.trim() : '';
+                };
+                const getAttr = (sel, attr) => {
+                    const e = el.querySelector(sel);
+                    return e ? e.getAttribute(attr) : '';
+                };
+                const title    = getText('h4, h3, [class*="title"]');
+                const price    = getText('[class*="price"], [data-cg-ft="price"]');
+                const mileage  = getText('[class*="mileage"], [class*="miles"]');
+                const location = getText('[class*="dealer-name"], [class*="location"]');
+                const deal     = getText('[class*="deal-rating"], [class*="priceAnalysis"]');
+                const link     = getAttr('a[href*="/usedcars/"]', 'href') ||
+                                 getAttr('a', 'href');
+                const img      = getAttr('img', 'src');
+                if (title || price) {
+                    results.push({title, price, mileage, location, deal, link, img});
+                }
+            });
+            return results;
+        }
+        """
         cards = []
         try:
-            cards = await page.evaluate("""
-            () => {
-                const results = [];
-                // CarGurus listing cards — selectors based on current structure
-                const containers = document.querySelectorAll(
-                    '[data-cg-ft="car-blade"], [class*="CarCard"], [class*="listing-row"]'
-                );
-                containers.forEach(el => {
-                    const getText = (sel) => {
-                        const e = el.querySelector(sel);
-                        return e ? e.innerText.trim() : '';
-                    };
-                    const getAttr = (sel, attr) => {
-                        const e = el.querySelector(sel);
-                        return e ? e.getAttribute(attr) : '';
-                    };
-                    const title   = getText('h4, h3, [class*="title"]');
-                    const price   = getText('[class*="price"], [data-cg-ft="price"]');
-                    const mileage = getText('[class*="mileage"], [class*="miles"]');
-                    const location= getText('[class*="dealer-name"], [class*="location"]');
-                    const deal    = getText('[class*="deal-rating"], [class*="priceAnalysis"]');
-                    const link    = getAttr('a[href*="/usedcars/"]', 'href') ||
-                                    getAttr('a', 'href');
-                    const img     = getAttr('img', 'src');
-                    if (title || price) {
-                        results.push({title, price, mileage, location, deal, link, img});
-                    }
-                });
-                return results;
-            }
-            """)
+            cards = await asyncio.wait_for(page.evaluate(_JS_EXTRACT), timeout=15)
+        except asyncio.TimeoutError:
+            logger.warning("  CarGurus: JS card extraction timed out")
         except Exception as exc:
             logger.debug(f"CarGurus card extraction error: {exc}")
+
+        if not cards:
+            # Diagnostic: log how many matching elements Playwright can see
+            # so we know whether the selectors are wrong vs the page is empty.
+            try:
+                counts = await asyncio.wait_for(
+                    page.evaluate("""
+                    () => ({
+                        blade:     document.querySelectorAll('[data-cg-ft="car-blade"]').length,
+                        carcard:   document.querySelectorAll('[class*="CarCard"]').length,
+                        row:       document.querySelectorAll('[class*="listing-row"]').length,
+                        body_len:  document.body ? document.body.innerText.length : 0,
+                    })
+                    """),
+                    timeout=5,
+                )
+                logger.info(
+                    f"  CarGurus selector counts: "
+                    f"blade={counts.get('blade')}, carcard={counts.get('carcard')}, "
+                    f"row={counts.get('row')}, body_chars={counts.get('body_len')}"
+                )
+            except Exception:
+                pass
 
         return cards
 
