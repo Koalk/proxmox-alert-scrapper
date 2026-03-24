@@ -9,13 +9,18 @@ ARCHITECTURE:
   Imports Listing, _jitter, _STEALTH_JS from autotrader.py.
 
 KEY GOTCHAS:
-  - Motors search filtering is unreliable — completely wrong-make cars appear
-    in results. MUST validate expected_make against listing.title after parsing.
-  - Cards are extracted by JS walking the DOM (_JS_EXTRACT block); falls back
-    to grouping by /car-{id}/ link proximity if no article containers found.
-  - Model names need URL encoding: spaces→+, see _MODEL_OVERRIDES dict.
-  - Listing IDs prefixed with 'mt_' to avoid clashing with AutoTrader IDs.
+  - The search URL base is /search/ which redirects to /used-cars/ but the
+    query string make/model params appear to be IGNORED by Motors' backend.
+    The page returns the generic homepage content (276k unfiltered cars)
+    with 4 'Latest Reduced Cars' featured cards, not real search results.
+    The make/model filter in _scrape_search correctly rejects all of them,
+    so Motors will consistently return 0 listings. This is correct behaviour.
+  - Card extraction uses a /car-{digits}/ regex to avoid picking up nav links
+    like /sell-my-car/, /car-valuation/ etc. (was a prior bug).
   - Config block is still called 'autotrader' (at_cfg) — same config key reused.
+  - Listing IDs prefixed with 'mt_'.
+  - _MODEL_OVERRIDES maps model names to Motors URL format (EV6→EV6, Ioniq 5→Ioniq+5).
+    EV6/EV3 do NOT have a + (no space in name); Ioniq 5/Sealion 7 DO (two words).
 
 CONFIG KEYS: same search.autotrader block as autotrader.py.
 """
@@ -23,7 +28,7 @@ CONFIG KEYS: same search.autotrader block as autotrader.py.
 import asyncio
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -39,14 +44,14 @@ logger = logging.getLogger(__name__)
 # Map config model names to Motors query values where they differ from the
 # plain model name.
 _MODEL_OVERRIDES: dict[str, str] = {
-    "Ioniq 5":  "Ioniq+5",
-    "ID.3":     "ID+3",
-    "ID.4":     "ID+4",
-    "ID.5":     "ID+5",
-    "Sealion 7": "Sealion+7",
-    "EV6":      "EV+6",
-    "EV3":      "EV+3",
-    "iX3":      "iX3",
+    "Ioniq 5":   "Ioniq+5",   # two words, + = space
+    "ID.3":      "ID.3",      # Motors keeps the dot
+    "ID.4":      "ID.4",
+    "ID.5":      "ID.5",
+    "Sealion 7": "Sealion+7", # two words
+    "EV6":       "EV6",       # one word, no space
+    "EV3":       "EV3",       # one word, no space
+    "iX3":       "iX3",
 }
 
 _MOTORS_SEARCH = "https://www.motors.co.uk/search/"
@@ -204,25 +209,43 @@ class MotorsScraper:
             return listings
 
         logger.info(f"  Page 1: {len(cards)} cards")
-        expected_make = at_cfg.get("make", "").lower()
+        expected_make  = at_cfg.get("make", "").lower()
+        expected_model = at_cfg.get("model", "").lower()
+        rejected_make = 0
         for card in cards:
             if len(listings) >= self.max_per_search:
                 break
             listing = self._card_to_listing(card, search["name"])
             if not listing:
                 continue
-            if expected_make and expected_make not in listing.title.lower():
-                logger.debug(f"  Skipping wrong-make listing: {listing.title[:50]}")
-                continue
+            combined = f"{listing.title} {listing.spec_summary}".lower()
+            # Motors search filtering is unreliable — reject cards where neither
+            # the make nor the model name appears anywhere in the card text.
+            if expected_make or expected_model:
+                if expected_make not in combined and expected_model not in combined:
+                    rejected_make += 1
+                    logger.debug(f"  Skipping: '{listing.title[:50]}'")
+                    continue
             if known_ids and listing.listing_id in known_ids:
                 continue
-            combined = f"{listing.title} {listing.spec_summary}".lower()
             if require and not all(k in combined for k in require):
                 continue
             if any(k in combined for k in exclude):
                 continue
             listings.append(listing)
 
+        if rejected_make:
+            if rejected_make == len(cards):
+                # All cards were wrong-make — Motors returned unrelated featured
+                # cars rather than real search results (known backend issue).
+                logger.debug(
+                    f"  All {len(cards)} cards filtered: Motors search params appear"
+                    f" to be ignored for this search"
+                )
+            else:
+                logger.info(
+                    f"  Skipped {rejected_make}/{len(cards)} cards: make/model not found in card text"
+                )
         return listings
 
     async def _get_listing_cards(self, page: Page, url: str) -> list:
@@ -273,9 +296,12 @@ class MotorsScraper:
         # divs with data-vehicle / data-listing attributes.
         # The JS extractor tries multiple container patterns and falls back
         # to walking up from /car-{id}/ href anchors.
-        _JS_EXTRACT = """
+        _JS_EXTRACT = r"""
         () => {
             const results = [];
+
+            // Only match actual listing links: /car-{digits}/ not nav links like /sell-my-car/
+            const CAR_LINK_RE = /\/car-\d+\//;
 
             // Try known container selectors first
             const CONTAINER_SELS = [
@@ -293,19 +319,22 @@ class MotorsScraper:
             let containers = [];
             for (const sel of CONTAINER_SELS) {
                 const found = Array.from(document.querySelectorAll(sel))
-                    .filter(el => el.querySelector('a[href*="/car-"]'));
+                    .filter(el => el.querySelector('a[href]') &&
+                        Array.from(el.querySelectorAll('a[href]')).some(a => CAR_LINK_RE.test(a.getAttribute('href'))));
                 if (found.length > 0) { containers = found; break; }
             }
 
-            // Fallback: group by /car-{id}/ link proximity
+            // Fallback: group by /car-{digits}/ link proximity
             if (containers.length === 0) {
-                const carLinks = document.querySelectorAll('a[href*="/car-"]');
+                const carLinks = Array.from(document.querySelectorAll('a[href]'))
+                    .filter(a => CAR_LINK_RE.test(a.getAttribute('href')));
                 const seen = new Set();
                 carLinks.forEach(a => {
                     let el = a.parentElement;
                     for (let i = 0; i < 8; i++) {
                         if (!el || el === document.body) break;
-                        const inner = el.querySelectorAll('a[href*="/car-"]');
+                        const inner = Array.from(el.querySelectorAll('a[href]'))
+                            .filter(x => CAR_LINK_RE.test(x.getAttribute('href')));
                         if (inner.length === 1 && !seen.has(el)) {
                             seen.add(el);
                             containers.push(el);
@@ -335,7 +364,8 @@ class MotorsScraper:
                                    '[class*="dealer"]','[class*="distance"]');
                 const spec     = g('[class*="spec"]','[class*="Spec"]',
                                    '[class*="description"]');
-                const linkEl   = el.querySelector('a[href*="/car-"]');
+                const linkEl   = Array.from(el.querySelectorAll('a[href]'))
+                    .find(a => CAR_LINK_RE.test(a.getAttribute('href')));
                 const link     = linkEl ? linkEl.getAttribute('href') : '';
                 const imgEl    = el.querySelector('img[src]:not([src=""])')
                                || el.querySelector('img[data-src]');
@@ -361,11 +391,15 @@ class MotorsScraper:
             try:
                 counts = await asyncio.wait_for(
                     page.evaluate("""
-                    () => ({
-                        articles:  document.querySelectorAll('article').length,
-                        car_links: document.querySelectorAll('a[href*="/car-"]').length,
-                        body_len:  document.body ? document.body.innerText.length : 0,
-                    })
+                    () => {
+                        const CAR_LINK_RE = /\\/car-\\d+\\//;
+                        return {
+                            articles:  document.querySelectorAll('article').length,
+                            car_links: Array.from(document.querySelectorAll('a[href]'))
+                                           .filter(a => CAR_LINK_RE.test(a.getAttribute('href'))).length,
+                            body_len:  document.body ? document.body.innerText.length : 0,
+                        };
+                    }
                     """),
                     timeout=5,
                 )
@@ -448,5 +482,5 @@ class MotorsScraper:
             image_urls=[img] if img and img.startswith("http") else [],
             attention_check=" | ".join(flags),
             search_name=search_name,
-            scraped_at=datetime.utcnow().isoformat(),
+            scraped_at=datetime.now(timezone.utc).isoformat(),
         )
