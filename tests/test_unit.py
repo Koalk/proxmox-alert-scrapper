@@ -486,15 +486,15 @@ class TestEmailCap:
         assert "more listing" not in html.lower()
 
     def test_new_listings_take_priority_over_updated(self):
-        """With cap=5 and 5 new + 3 updated, all 5 new shown, 0 updated."""
+        """With cap=5 and 5 new + 3 updated, all 8 combined sorted by price, cap trims to 5."""
         html = self._build(new_count=5, updated_count=3, cap=5)
-        # Overflow note should indicate 3 omitted
+        # 8 total, only 5 shown → 3 omitted
         assert "3 more listing" in html
-        # Updated section should not appear (0 slots left)
-        assert "Price Changes" not in html
+        # Both new and price-change badges may appear
+        assert "Price Changes" not in html  # old section header gone
 
     def test_remaining_slots_fill_with_updated(self):
-        """With cap=8 and 5 new + 5 updated, 5 new + 3 updated shown, 2 omitted."""
+        """With cap=8 and 5 new + 5 updated, 8 shown, 2 omitted."""
         html = self._build(new_count=5, updated_count=5, cap=8)
         assert "2 more listing" in html
 

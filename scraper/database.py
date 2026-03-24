@@ -50,7 +50,8 @@ class ListingDatabase:
                     last_seen       TEXT,
                     times_seen      INTEGER DEFAULT 1,
                     is_new          INTEGER DEFAULT 1,
-                    email_sent      INTEGER DEFAULT 0
+                    email_sent      INTEGER DEFAULT 0,
+                    source          TEXT DEFAULT 'autotrader'
                 );
 
                 CREATE TABLE IF NOT EXISTS run_log (
@@ -61,10 +62,12 @@ class ListingDatabase:
                     new_count    INTEGER
                 );
             """)
-            # Migrate existing databases that predate the email_sent column
+            # Migrate existing databases
             existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(listings)")}
             if "email_sent" not in existing_cols:
                 conn.execute("ALTER TABLE listings ADD COLUMN email_sent INTEGER DEFAULT 0")
+            if "source" not in existing_cols:
+                conn.execute("ALTER TABLE listings ADD COLUMN source TEXT DEFAULT 'autotrader'")
 
     def mark_run_start(self) -> int:
         with self._connect() as conn:
@@ -108,15 +111,16 @@ class ListingDatabase:
                         (listing_id, search_name, title, price, year, mileage,
                          location, distance_miles, seller_type, seller_name,
                          spec_summary, url, image_urls, attention_check,
-                         scraped_at, first_seen, last_seen, times_seen, is_new)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1)
+                         scraped_at, first_seen, last_seen, times_seen, is_new, source)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,?)
                     """, (
                         listing.listing_id, listing.search_name, listing.title,
                         listing.price, listing.year, listing.mileage,
                         listing.location, listing.distance_miles,
                         listing.seller_type, listing.seller_name,
                         listing.spec_summary, listing.url, image_json,
-                        listing.attention_check, listing.scraped_at, now, now
+                        listing.attention_check, listing.scraped_at, now, now,
+                        getattr(listing, "source", "autotrader"),
                     ))
                     new_listings.append(listing)
                 else:

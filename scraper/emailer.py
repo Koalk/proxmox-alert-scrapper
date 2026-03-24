@@ -161,52 +161,35 @@ def build_html_email(
 ) -> str:
     """Build the full HTML email body."""
 
-    # Cap total car cards shown to max_email_listings (new listings take priority)
-    new_to_show     = new_listings[:max_email_listings]
-    remaining_slots = max(0, max_email_listings - len(new_to_show))
-    updated_to_show = updated_listings[:remaining_slots]
-    total_omitted   = (
-        (len(new_listings) - len(new_to_show))
-        + (len(updated_listings) - len(updated_to_show))
+    # Combine new and price-changed, sort by price ascending (None/POA last)
+    all_unsent = sorted(
+        new_listings + updated_listings,
+        key=lambda l: (
+            (l.get("price") or 0) == 0,   # POA / None sorts last
+            l.get("price") or 0,
+        ),
     )
+    to_show      = all_unsent[:max_email_listings]
+    total_omitted = len(all_unsent) - len(to_show)
 
-    new_section = ""
-    if new_to_show:
-        cards = "".join(
-            _car_card(l.to_dict() if hasattr(l, "to_dict") else l, "🆕 New")
-            for l in new_to_show
-        )
-        new_section = f"""
-        <h2 style="color:#155724;border-bottom:2px solid #28a745;
-                   padding-bottom:6px;">
-          🆕 New Listings ({len(new_listings)})
+    def _badge(l):
+        return "🆕 New" if l.get("is_new") else "💲 Price Changed"
+
+    listings_section = ""
+    if to_show:
+        cards = "".join(_car_card(l, _badge(l)) for l in to_show)
+        listings_section = f"""
+        <h2 style="color:#155724;border-bottom:2px solid #28a745;padding-bottom:6px;">
+          Listings ({len(all_unsent)})
         </h2>
         {cards}
         """
     else:
-        new_section = """
-        <h2 style="color:#155724;border-bottom:2px solid #28a745;
-                   padding-bottom:6px;">
-          🆕 New Listings
+        listings_section = """
+        <h2 style="color:#155724;border-bottom:2px solid #28a745;padding-bottom:6px;">
+          Listings
         </h2>
         <p style="color:#666;">No new listings since last run.</p>
-        """
-
-    updated_section = ""
-    if updated_to_show:
-        cards = "".join(
-            _car_card(
-                l.to_dict() if hasattr(l, "to_dict") else l,
-                "💲 Price Changed"
-            )
-            for l in updated_to_show
-        )
-        updated_section = f"""
-        <h2 style="color:#856404;border-bottom:2px solid #ffc107;
-                   padding-bottom:6px;">
-          💲 Price Changes ({len(updated_listings)})
-        </h2>
-        {cards}
         """
 
     overflow_note = ""
@@ -254,7 +237,7 @@ def build_html_email(
         <h1 style="margin:0;font-size:22px;">🚗 EV Car Alert Digest</h1>
         <p style="margin:6px 0 0;opacity:0.85;font-size:14px;">
           {run_date} &bull;
-          {len(new_listings)} new &bull;
+          {len(new_listings)} new, {len(updated_listings)} price changes &bull;
           {stats.get('total_in_db',0)} total in database
         </p>
       </div>
@@ -273,8 +256,7 @@ def build_html_email(
       </table>
 
       {_error_banner(run_errors) if run_errors else ""}
-      {new_section}
-      {updated_section}
+      {listings_section}
       {overflow_note}
 
       {_update_banner(update_info) if update_info else ""}

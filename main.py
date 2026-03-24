@@ -124,14 +124,19 @@ def dedup_across_sources(listings: list) -> list:
 
     at_keys: set = set()
     for l in at_listings:
-        key = (l.price, l.mileage, l.title[:20].lower())
-        at_keys.add(key)
+        # Only use as dedup key when both price and mileage are known —
+        # otherwise (None, None, title) wrongly matches Motors listings for same model
+        if l.price is not None and l.mileage is not None:
+            key = (l.price, l.mileage, l.title[:20].lower())
+            at_keys.add(key)
 
     unique_other = []
     for l in other_listings:
-        key = (l.price, l.mileage, l.title[:20].lower())
-        if key not in at_keys:
-            unique_other.append(l)
+        if l.price is not None and l.mileage is not None:
+            key = (l.price, l.mileage, l.title[:20].lower())
+            if key in at_keys:
+                continue
+        unique_other.append(l)
 
     dupes = len(other_listings) - len(unique_other)
     if dupes:

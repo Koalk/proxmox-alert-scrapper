@@ -14,6 +14,7 @@ Anti-detection:
 """
 
 import asyncio
+import json
 import logging
 import random
 import re
@@ -396,29 +397,69 @@ class AutoTraderScraper:
         self, page: Page, url: str, search_name: str
     ) -> Optional[Listing]:
         await page.goto(url, timeout=self.timeout, wait_until="domcontentloaded")
-        await asyncio.sleep(_jitter(0.8))
+        await asyncio.sleep(_jitter(1.5))
 
         # Listing ID from URL
         id_match = re.search(r"/car-details/(\d+)", url)
         listing_id = id_match.group(1) if id_match else url.split("/")[-1]
 
-        # ---------- Price ----------
-        price = None
-        for sel in [
-            '[data-testid="listing-price"]',
-            '[class*="price--"] h2',
-            '.vehicle-price',
-            'h2[class*="price"]',
-            'span[class*="price"]',
-        ]:
-            try:
-                raw = await page.locator(sel).first.inner_text(timeout=3000)
-                digits = re.sub(r"[^\d]", "", raw)
-                if digits and int(digits) > 500:   # sanity: not a partial number
-                    price = int(digits)
-                    break
-            except Exception:
-                pass
+        # ---------- JSON-LD (most stable — AutoTrader embeds schema.org data) ----------
+        price, mileage = None, None
+        try:
+            ld_scripts = await page.eval_on_selector_all(
+                'script[type="application/ld+json"]',
+                'els => els.map(e => e.textContent)',
+            )
+            for ld_text in ld_scripts:
+                try:
+                    ld = json.loads(ld_text)
+                    items = ld if isinstance(ld, list) else ld.get('@graph', [ld])
+                    for item in (items if isinstance(items, list) else [items]):
+                        if not isinstance(item, dict):
+                            continue
+                        if price is None:
+                            offer = item.get('offers', {})
+                            p = (offer.get('price') if isinstance(offer, dict) else None) or item.get('price')
+                            if p is not None:
+                                try:
+                                    candidate = int(float(str(p).replace(',', '')))
+                                    if 500 < candidate < 200000:
+                                        price = candidate
+                                except (ValueError, TypeError):
+                                    pass
+                        if mileage is None:
+                            m_obj = item.get('mileageFromOdometer', {})
+                            if isinstance(m_obj, dict) and m_obj.get('value'):
+                                try:
+                                    candidate = int(float(str(m_obj['value'])))
+                                    if 100 < candidate < 300000:
+                                        mileage = candidate
+                                except (ValueError, TypeError):
+                                    pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # ---------- Price (CSS selectors + body text fallback) ----------
+        if price is None:
+            for sel in [
+                '[data-testid="listing-price"]',
+                '[data-testid="advert-price"]',
+                '[class*="price--"] h2',
+                '[class*="priceIndicator"]',
+                '.vehicle-price',
+                'h2[class*="price"]',
+                'span[class*="price"]',
+            ]:
+                try:
+                    raw = await page.locator(sel).first.inner_text(timeout=2000)
+                    digits = re.sub(r"[^\d]", "", raw)
+                    if digits and int(digits) > 500:
+                        price = int(digits)
+                        break
+                except Exception:
+                    pass
 
         # ---------- Title ----------
         title = ""
@@ -452,19 +493,43 @@ class AutoTraderScraper:
                 pass
 
         # ---------- Year, Mileage (from body text fallback) ----------
-        year, mileage = None, None
         try:
             body = await page.inner_text("body", timeout=8000)
-            y = re.search(r"(?:Year|Reg(?:istration)?)\s*[:\|]?\s*(\d{4})", body)
-            m = re.search(r"([\d,]+)\s*miles?", body)
-            if y:
-                year = int(y.group(1))
-            if m:
-                candidate = int(m.group(1).replace(",", ""))
-                if 100 < candidate < 300000:   # sanity bounds
-                    mileage = candidate
         except Exception:
-            pass
+            body = ""
+
+        if year is None:
+            try:
+                y = re.search(r"(?:Year|Reg(?:istration)?)\s*[:\|]?\s*(\d{4})", body)
+                if y:
+                    year = int(y.group(1))
+            except Exception:
+                pass
+
+        if mileage is None:
+            try:
+                # Exclude "X miles away" — match mileage odometer readings only
+                candidates = re.findall(
+                    r'([\d,]+)\s+miles?(?!\s+away)(?!\s+from)', body
+                )
+                for mc in candidates:
+                    candidate = int(mc.replace(',', ''))
+                    if 100 < candidate < 300000:
+                        mileage = candidate
+                        break
+            except Exception:
+                pass
+
+        if price is None:
+            try:
+                price_matches = re.findall(r'£([\d,]+)', body)
+                for p_str in price_matches:
+                    candidate = int(p_str.replace(',', ''))
+                    if 1000 < candidate < 150000:
+                        price = candidate
+                        break
+            except Exception:
+                pass
 
         # ---------- Location ----------
         location = ""
@@ -508,8 +573,8 @@ class AutoTraderScraper:
         image_urls = []
         try:
             imgs = await page.eval_on_selector_all(
-                'img[src*="media.autotrader"], img[src*="cdn.at"], '
-                'img[src*="cdnimages"]',
+                'img[src*="atcdn.co.uk"], img[src*="media.autotrader"], '
+                'img[src*="cdn.at"], img[src*="cdnimages"]',
                 "els => els.map(e => e.src)",
             )
             image_urls = [
@@ -522,7 +587,7 @@ class AutoTraderScraper:
         # ---------- Attention flags ----------
         flags = []
         try:
-            page_text = (await page.inner_text("body", timeout=5000)).lower()
+            page_text = body.lower() if body else (await page.inner_text("body", timeout=5000)).lower()
         except Exception:
             page_text = ""
 
