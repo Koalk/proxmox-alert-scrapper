@@ -372,7 +372,8 @@ async def main():
             ok = send_email(config, new_listings, updated_listings,
                             all_active, stats, update_info=update_info,
                             run_errors=run_errors if run_errors else None,
-                            max_email_listings=max_email_listings)
+                            max_email_listings=max_email_listings,
+                            json_path=json_path)
             if ok:
                 if unsent:
                     db.mark_as_sent([l["listing_id"] for l in unsent])
