@@ -208,6 +208,30 @@ async def main():
         f"({len(searches) - len(enabled)} disabled)"
     )
 
+    # --- Resume detection ---
+    # If a previous run saved partial results but didn't finish (e.g. crashed
+    # or timed out), skip searches that already have fresh unsent data in the DB
+    # so we don't re-scrape them from scratch.
+    already_done = db.get_searches_with_recent_unsent()
+    if already_done:
+        searches_to_run = [s for s in enabled if s["name"] not in already_done]
+        logger.info(
+            f"Resuming partial run — {len(already_done)} search(es) already "
+            f"have unsent data, skipping: {sorted(already_done)}"
+        )
+        if searches_to_run:
+            logger.info(
+                f"Continuing with {len(searches_to_run)} remaining search(es): "
+                f"{[s['name'] for s in searches_to_run]}"
+            )
+        else:
+            logger.info(
+                "All searches already complete — skipping scraping, "
+                "proceeding to email"
+            )
+    else:
+        searches_to_run = enabled
+
     all_scraped = []
 
     # Save each search's results to DB immediately as it completes.
@@ -221,7 +245,7 @@ async def main():
     at_results = []
     try:
         at_results = await AutoTraderScraper(config).scrape_all(
-            enabled, on_search_done=_save_partial
+            searches_to_run, on_search_done=_save_partial
         )
         all_scraped.extend(at_results)
         logger.info(f"AutoTrader total: {len(at_results)} listings")
@@ -232,7 +256,7 @@ async def main():
     if not args.autotrader_only:
         logger.info("--- CarGurus ---")
         try:
-            cg_results = await CarGurusScraper(config).scrape_all(enabled)
+            cg_results = await CarGurusScraper(config).scrape_all(searches_to_run)
             all_scraped.extend(cg_results)
             # Cross-source dedup: only save CG listings that aren't already
             # represented by an AutoTrader entry (same price+mileage+title prefix)

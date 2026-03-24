@@ -9,7 +9,7 @@ Also stores full listing data for the JSON export.
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -181,6 +181,26 @@ class ListingDatabase:
                 d["image_urls"] = json.loads(d.get("image_urls") or "[]")
                 result.append(d)
             return result
+
+    def get_searches_with_recent_unsent(self, max_age_hours: int = 20) -> set[str]:
+        """
+        Return search names that have unsent listings scraped within the last
+        max_age_hours.  Used to skip re-scraping searches that already completed
+        in a previous run that failed before sending the email.
+        max_age_hours=20 means yesterday's run (which already sent its email
+        and stripped the data) won't match, but a run from 2 hours ago will.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        ).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT DISTINCT search_name FROM listings
+                WHERE email_sent = 0
+                  AND title IS NOT NULL
+                  AND last_seen >= ?
+            """, (cutoff,)).fetchall()
+            return {row[0] for row in rows}
 
     def mark_as_sent(self, listing_ids: list[str]):
         """

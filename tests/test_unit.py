@@ -6,6 +6,7 @@ Run with:  pytest tests/test_unit.py -v
 
 import sys
 import tempfile
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -167,13 +168,13 @@ class TestListingDatabase:
         tmp = tempfile.mkdtemp()
         return ListingDatabase(f"{tmp}/test.db")
 
-    def _listing(self, listing_id="L1", price=18000, **kwargs):
+    def _listing(self, listing_id="L1", price=18000, search_name="Test Search", **kwargs):
         return Listing(
             listing_id=listing_id, title="Kia EV6 2022", price=price,
             year=2022, mileage=30000, location="Edinburgh", distance_miles=5,
             seller_type="dealer", seller_name="EV Cars Ltd",
             spec_summary="Auto | Electric", url="https://example.com",
-            search_name="Test Search",
+            search_name=search_name,
         )
 
     def test_new_listing_has_email_sent_false(self):
@@ -260,6 +261,39 @@ class TestListingDatabase:
         db = ListingDatabase(db_path)
         cols = {row[1] for row in db._connect().execute("PRAGMA table_info(listings)")}
         assert "email_sent" in cols
+
+    def test_resume_detects_recent_unsent_search(self):
+        """Searches with unsent data scraped recently are returned."""
+        db = self._db()
+        db.process_listings([self._listing(listing_id="L1", search_name="Kia EV6")])
+        db.process_listings([self._listing(listing_id="L2", search_name="BMW iX3")])
+        recent = db.get_searches_with_recent_unsent(max_age_hours=1)
+        assert "Kia EV6" in recent
+        assert "BMW iX3" in recent
+
+    def test_resume_ignores_sent_listings(self):
+        """Searches whose listings are already sent are not returned."""
+        db = self._db()
+        db.process_listings([self._listing(listing_id="L1", search_name="Kia EV6")])
+        db.mark_as_sent(["L1"])
+        recent = db.get_searches_with_recent_unsent(max_age_hours=1)
+        assert "Kia EV6" not in recent
+
+    def test_resume_ignores_old_unsent_listings(self):
+        """Unsent listings older than max_age_hours are not returned (yesterday's run)."""
+        db = self._db()
+        db.process_listings([self._listing(listing_id="L1", search_name="Kia EV6")])
+        # Back-date last_seen to 25 hours ago to simulate a previous day's run
+        old_ts = (
+            datetime.now(timezone.utc) - timedelta(hours=25)
+        ).isoformat()
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE listings SET last_seen = ? WHERE listing_id = 'L1'",
+                (old_ts,)
+            )
+        recent = db.get_searches_with_recent_unsent(max_age_hours=20)
+        assert "Kia EV6" not in recent
 
 
 # ---------------------------------------------------------------------------
