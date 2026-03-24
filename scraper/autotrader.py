@@ -161,6 +161,14 @@ class AutoTraderScraper:
                     logger.info(
                         f"  → {len(results)} listings kept for {search['name']}"
                     )
+                    if on_search_done is not None:
+                        try:
+                            on_search_done(results)
+                        except Exception as cb_exc:
+                            logger.error(
+                                f"on_search_done callback failed for "
+                                f"'{search['name']}': {cb_exc}", exc_info=True
+                            )
                 except Exception as exc:
                     logger.error(
                         f"Search '{search['name']}' failed: {exc}", exc_info=True
