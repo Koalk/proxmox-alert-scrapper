@@ -72,19 +72,13 @@ class TestCarGurusIntegration:
         url = build_cargurus_url(cfg, page_num=1)
         _p(f"\nBuilt URL: {url}")
         assert "cargurus.co.uk" in url
-        assert "KIA" in url.upper() or "kia" in url.lower()
-        assert "EV6" in url.upper() or "ev6" in url.lower()
-        assert "priceMax=30000" in url or "pricemax" in url.lower()
-        assert "fuelTypes=electric" in url or "fueltypes=electric" in url.lower()
-
-    def test_url_contains_hash_fragment(self):
-        cfg = _ONE_SEARCH[0]["autotrader"]
-        url = build_cargurus_url(cfg)
-        _p(f"\nURL: {url}")
-        assert "#listing?" in url, (
-            f"Hash fragment missing: {url}\n"
-            "CarGurus is a React SPA â€” params must be in the hash fragment."
-        )
+        assert "viewDetailsFilterViewInventoryListing.action" in url
+        # Kia EV6 has a confirmed model ID
+        assert "m306" in url
+        assert "d6251" in url
+        assert "maxPrice=30000" in url
+        assert "sortType=PRICE" in url
+        assert "isDeliveryEnabled=true" in url
 
     # --- Live page diagnostics ---
 
@@ -132,8 +126,10 @@ class TestCarGurusIntegration:
                     blade:        document.querySelectorAll('[data-cg-ft="car-blade"]').length,
                     carcard:      document.querySelectorAll('[class*="CarCard"]').length,
                     row:          document.querySelectorAll('[class*="listing-row"]').length,
-                    usedcars_a:   document.querySelectorAll('a[href*="/usedcars/"]').length,
-                    listing_a:    document.querySelectorAll('a[href*="listing"]').length,
+                    testid:       document.querySelectorAll('[data-testid*="listing"]').length,
+                    result_li:    document.querySelectorAll('li[class*="result"]').length,
+                    listing_a:    document.querySelectorAll('a[href*="listingId"]').length,
+                    vdp_a:        document.querySelectorAll('a[href*="vdp.action"]').length,
                     all_classes:  Array.from(new Set(
                                     Array.from(document.querySelectorAll('[class]'))
                                          .flatMap(e => Array.from(e.classList))
@@ -144,9 +140,10 @@ class TestCarGurusIntegration:
                 })
                 """)
                 _p(f"  Counts    : blade={counts['blade']}, carcard={counts['carcard']}, "
-                   f"row={counts['row']}, usedcars_links={counts['usedcars_a']}, "
-                   f"listing_links={counts['listing_a']}, h4={counts['h4_count']}, "
-                   f"body_chars={counts['body_chars']}")
+                   f"row={counts['row']}, testid={counts['testid']}, "
+                   f"result_li={counts['result_li']}, "
+                   f"listing_links={counts['listing_a']}, vdp_links={counts['vdp_a']}, "
+                   f"h4={counts['h4_count']}, body_chars={counts['body_chars']}")
                 _p(f"  Relevant classes: {counts['all_classes']}")
 
                 body_text = await page.evaluate(
