@@ -110,8 +110,9 @@ class AutoTraderScraper:
         self.search_delay   = lim.get("search_delay_ms", 8000) / 1000
         self.max_per_search = lim.get("max_listings_per_search", 20)
         self.max_pages      = lim.get("max_pages_per_search", 2)
-        self.max_scrapes    = lim.get("max_scrapes_per_search", self.max_per_search * 4)
-        self.max_images     = lim.get("max_images_per_listing", 3)
+        self.max_scrapes          = lim.get("max_scrapes_per_search", self.max_per_search * 4)
+        self.max_images           = lim.get("max_images_per_listing", 3)
+        self.max_concurrent_pages = lim.get("max_concurrent_pages", 1)
         self._cookie_accepted = False   # only need to do this once per session
 
     # ------------------------------------------------------------------
@@ -204,7 +205,6 @@ class AutoTraderScraper:
         require  = [k.lower() for k in search.get("require_keywords", [])]
         exclude  = [k.lower() for k in search.get("exclude_keywords", [])]
         page_num = 1
-        scrapes  = 0
         _id_re   = re.compile(r"/car-details/(\d+)")
 
         # Walk pages until we find one that contains at least one unknown listing,
@@ -255,46 +255,46 @@ class AutoTraderScraper:
                     page_num += 1
                     continue
 
-            # Scrape this page's listings (up to max_per_search), then stop.
-            # We only ever want one page of results per search.
-            for url_idx, listing_url in enumerate(listing_urls):
-                if len(listings) >= self.max_per_search:
-                    break
-                if scrapes >= self.max_scrapes:
-                    logger.info(
-                        f"  Scrape limit ({self.max_scrapes}) reached — stopping"
-                    )
-                    break
-                scrapes += 1
-                logger.info(
-                    f"    [{url_idx+1}/{len(listing_urls)}] Scraping: "
-                    f"{listing_url.split('/')[-1]}"
-                )
-                detail = await context.new_page()
-                try:
-                    listing = await self._scrape_listing_with_retry(
-                        detail, listing_url, search["name"]
-                    )
-                    if listing and self._passes_filters(listing, require, exclude):
-                        listings.append(listing)
-                        price_str   = f"£{listing.price:,}" if listing.price else "£?"
-                        mileage_str = f"{listing.mileage:,}mi" if listing.mileage else "?mi"
-                        logger.info(
-                            f"    ✓ {listing.title[:60]} | "
-                            f"{price_str} | "
-                            f"{mileage_str} | "
-                            f"{listing.location[:30]}"
-                        )
-                    elif listing:
-                        logger.debug(f"    ✗ Filtered out: {listing.title[:50]}")
-                except Exception as exc:
-                    logger.warning(f"    Failed {listing_url}: {exc}")
-                finally:
+            # Scrape this page's listings concurrently, bounded by max_concurrent_pages.
+            # Pre-slice so we never visit more detail pages than max_scrapes allows.
+            urls_to_scrape = listing_urls[: min(len(listing_urls), self.max_scrapes)]
+            logger.info(
+                f"  Scraping {len(urls_to_scrape)} listings "
+                f"(concurrency: {self.max_concurrent_pages})…"
+            )
+            sem = asyncio.Semaphore(self.max_concurrent_pages)
+
+            async def _scrape_one(listing_url: str) -> "Listing | None":
+                async with sem:
+                    detail = await context.new_page()
                     try:
-                        await detail.close()
-                    except Exception:
-                        pass
-                await asyncio.sleep(_jitter(self.request_delay))
+                        result = await self._scrape_listing_with_retry(
+                            detail, listing_url, search["name"]
+                        )
+                        if result and self._passes_filters(result, require, exclude):
+                            price_str   = f"£{result.price:,}" if result.price else "£?"
+                            mileage_str = f"{result.mileage:,}mi" if result.mileage else "?mi"
+                            logger.info(
+                                f"    ✓ {result.title[:60]} | "
+                                f"{price_str} | {mileage_str} | "
+                                f"{result.location[:30]}"
+                            )
+                            return result
+                        if result:
+                            logger.debug(f"    ✗ Filtered out: {result.title[:50]}")
+                        return None
+                    except Exception as exc:
+                        logger.warning(f"    Failed {listing_url}: {exc}")
+                        return None
+                    finally:
+                        try:
+                            await detail.close()
+                        except Exception:
+                            pass
+                        await asyncio.sleep(_jitter(self.request_delay))
+
+            raw = await asyncio.gather(*[_scrape_one(u) for u in urls_to_scrape])
+            listings = [r for r in raw if r is not None][: self.max_per_search]
 
             # Always stop after scraping one page — one page per search
             break

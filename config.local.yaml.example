@@ -23,7 +23,7 @@ defaults:
 
 # --- Resource Limits (dialled back for local runs) ---
 limits:
-  max_concurrent_pages: 1
+  max_concurrent_pages: 3      # local machine has plenty of RAM — 3x faster listing scrape
   page_timeout_ms: 30000
   scroll_pause_ms: 1500
   request_delay_ms: 2000

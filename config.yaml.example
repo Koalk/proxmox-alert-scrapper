@@ -23,7 +23,9 @@ defaults:
 
 # --- Resource Limits (tune for your Proxmox server) ---
 limits:
-  max_concurrent_pages: 1      # keep at 1 to be gentle on RAM
+  max_concurrent_pages: 1      # AutoTrader listing detail pages scraped simultaneously.
+                               # 1 = sequential (safe for 512MB LXC). 3 is a good
+                               # balance: ~3x faster listing scrape, ~90MB extra RAM.
   page_timeout_ms: 30000       # 30s per page load
   scroll_pause_ms: 1500        # pause between scrolls (be polite to sites)
   request_delay_ms: 3000       # pause between listings within a search
