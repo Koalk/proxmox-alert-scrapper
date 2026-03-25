@@ -605,10 +605,14 @@ class AutoTraderScraper:
             w in page_text for w in ("certificate", "health report", "aviloo", "soh")
         ):
             flags.append("🔋 Battery cert mentioned")
-        if mileage and mileage > 80000:
-            flags.append(f"⚠️ High mileage ({mileage:,}mi)")
-        if mileage and mileage < 25000:
-            flags.append("✅ Low mileage")
+        if mileage is not None:
+            if mileage < 25000:
+                flags.append("✅ Low mileage")
+            elif mileage > 85000:
+                flags.append(f"🔴 Very high mileage — battery check essential ({mileage:,}mi)")
+            elif mileage > 60000:
+                flags.append(f"⚠️ Higher mileage ({mileage:,}mi)")
+            # 25k–60k is normal — no flag needed
         if any(w in page_text for w in ("write-off", "category s", "category n", "cat s", "cat n")):
             flags.append("🚨 Write-off language detected — check HPI")
         if seller_type == "private":
@@ -621,6 +625,15 @@ class AutoTraderScraper:
             flags.append("🐕 Dog-friendly boot liner mentioned")
         if "service history" in page_text:
             flags.append("📋 Service history mentioned")
+        commercial_signals = [
+            "pco", "private hire", "taxi", "uber", "bolt driver", "lyft",
+            "fleet", "rental", "hire car", "ex fleet", "ex-fleet",
+            "company car", "lease return", "minicab", "hackney",
+        ]
+        if any(s in page_text for s in commercial_signals):
+            flags.append("🚕 Commercial use signals found — verify history")
+        if search_name == "Hyundai Ioniq 5" and year in (2022, 2023, 2024):
+            flags.append("⚠️ ICCU recall risk — verify software fix applied (2022-24 models)")
 
         return Listing(
             listing_id=listing_id,
