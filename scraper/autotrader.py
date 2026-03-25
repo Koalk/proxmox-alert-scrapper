@@ -472,19 +472,33 @@ class AutoTraderScraper:
                     pass
 
         # ---------- Title ----------
+        # Try the browser tab title first — AutoTrader sets it to the full
+        # variant name, e.g. "2021 Skoda Enyaq iV 60 58kWh 132PS | AutoTrader".
+        # This is the richest source for exclude_keywords matching (e.g. "iV 60").
         title = ""
-        for sel in [
-            '[data-testid="advert-title"]',
-            'h1[class*="title"]',
-            'h1',
-        ]:
-            try:
-                t = (await page.locator(sel).first.inner_text(timeout=3000)).strip()
-                if t and len(t) > 5:
-                    title = t
+        try:
+            tab_title = await page.title()
+            for suffix in (" | AutoTrader", " | Auto Trader", " - AutoTrader"):
+                if tab_title.endswith(suffix):
+                    tab_title = tab_title[: -len(suffix)].strip()
                     break
-            except Exception:
-                pass
+            if tab_title and len(tab_title) > 5:
+                title = tab_title
+        except Exception:
+            pass
+        if not title:
+            for sel in [
+                '[data-testid="advert-title"]',
+                'h1[class*="title"]',
+                'h1',
+            ]:
+                try:
+                    t = (await page.locator(sel).first.inner_text(timeout=3000)).strip()
+                    if t and len(t) > 5:
+                        title = t
+                        break
+                except Exception:
+                    pass
 
         # ---------- Spec block ----------
         spec_summary = ""

@@ -6,6 +6,7 @@ RUN FLOW:
   load_config → apply_defaults → get known_ids from DB
     → AutoTraderScraper.scrape_all()   (on_search_done=_save_partial)
     → MotorsScraper.scrape_all()       (results saved via _save_partial too)
+    → CarGurusScraper.scrape_all()     (results saved via _save_partial too)
     → dedup_across_sources()           AT wins; dedup key=(price, mileage, title[:20])
     → db.get_unsent_listings()         new + price-changed rows where email_sent=0
     → send_email()                     marks rows sent + strips raw data
@@ -46,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from scraper.autotrader import AutoTraderScraper
 from scraper.motors     import MotorsScraper
+from scraper.cargurus   import CarGurusScraper
 from scraper.database   import ListingDatabase
 from scraper.emailer    import send_email
 
@@ -184,6 +186,8 @@ async def main():
         help="Send a test email immediately without scraping")
     parser.add_argument("--skip-motors", action="store_true",
         help="Skip Motors.co.uk scraper")
+    parser.add_argument("--skip-cargurus", action="store_true",
+        help="Skip CarGurus scraper")
     parser.add_argument("--reset-db", action="store_true",
         help="Wipe the entire database and exit — all history lost, next run starts fresh")
     parser.add_argument("--mark-unsent", action="store_true",
@@ -322,6 +326,28 @@ async def main():
             )
         except Exception as exc:
             msg = f"Motors scraper crashed: {exc}"
+            logger.error(msg, exc_info=True)
+            run_errors.append(msg)
+
+    # --- CarGurus (optional) ---
+    if not args.skip_cargurus:
+        logger.info("--- CarGurus ---")
+        try:
+            cg_results = await CarGurusScraper(config).scrape_all(
+                searches_to_run, on_search_done=_save_partial, known_ids=known_ids
+            )
+            all_scraped.extend(cg_results)
+            # dedup against AT + Motors listings
+            unique_cg = [
+                l for l in dedup_across_sources(at_results + cg_results)
+                if l.source == "cargurus"
+            ]
+            logger.info(
+                f"CarGurus total: {len(cg_results)} listings "
+                f"({len(unique_cg)} unique after cross-source dedup)"
+            )
+        except Exception as exc:
+            msg = f"CarGurus scraper crashed: {exc}"
             logger.error(msg, exc_info=True)
             run_errors.append(msg)
 

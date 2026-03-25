@@ -13,7 +13,7 @@ from unittest.mock import patch, MagicMock
 # Make sure the repo root is on sys.path when running from any directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scraper.autotrader import build_autotrader_url, Listing
+from scraper.autotrader import AutoTraderScraper, build_autotrader_url, Listing
 from scraper.cargurus  import build_cargurus_url, _get_make_model_ids
 from scraper.motors    import build_motors_url, MotorsScraper
 from scraper.database  import ListingDatabase
@@ -826,3 +826,108 @@ class TestCarCardSourceLabel:
     def test_motors_button_label(self):
         html = _car_card(self._listing_dict("motors"))
         assert "Motors.co.uk" in html
+
+
+# ---------------------------------------------------------------------------
+# AutoTrader — _passes_filters (exclude/require keyword logic)
+# This is the function that guards against unwanted variants slipping through.
+# The bug: titles like "Skoda Enyaq" (no variant) meant "iV 60" was never found
+# to exclude.  Fix: title is now sourced from the browser tab, e.g.
+# "2021 Skoda Enyaq iV 60 58kWh 132PS | AutoTrader", which contains the variant.
+# ---------------------------------------------------------------------------
+
+class TestPassesFilters:
+    def _scraper(self):
+        return AutoTraderScraper({"limits": {}})
+
+    def _listing(self, title="", spec_summary=""):
+        return Listing(
+            listing_id="test_1", title=title, price=18000, year=2022,
+            mileage=30000, location="Edinburgh", distance_miles=5,
+            seller_type="dealer", seller_name="Dealer", spec_summary=spec_summary,
+            url="https://www.autotrader.co.uk/car-details/test_1",
+        )
+
+    def test_no_filters_always_passes(self):
+        s = self._scraper()
+        assert s._passes_filters(self._listing("Skoda Enyaq iV 80"), [], []) is True
+
+    def test_exclude_keyword_in_title_rejected(self):
+        """The core bug scenario: iV 60 variant must be excluded when title is full."""
+        s = self._scraper()
+        listing = self._listing(title="2021 Skoda Enyaq iV 60 58kWh 132PS")
+        assert s._passes_filters(listing, [], ["iv 60"]) is False
+
+    def test_enyaq_iv80_not_excluded_by_iv60_rule(self):
+        """iV 80 listing must NOT be caught by the iV 60 exclude rule."""
+        s = self._scraper()
+        listing = self._listing(title="2022 Skoda Enyaq iV 80 82kWh 204PS")
+        assert s._passes_filters(listing, [], ["iv 60"]) is True
+
+    def test_exclude_keyword_in_spec_summary_rejected(self):
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq", spec_summary="60kWh | RWD")
+        assert s._passes_filters(listing, [], ["60kwh"]) is False
+
+    def test_title_is_lowercased_for_matching(self):
+        """combined is lowercased so titles with any casing match the (pre-lowercased) keyword.
+        In production, _scrape_search lowercases keywords before passing them here."""
+        s = self._scraper()
+        # Mixed-case and upper-case titles are both caught by the lowercased keyword
+        assert s._passes_filters(self._listing(title="Skoda Enyaq iV 60"), [], ["iv 60"]) is False
+        assert s._passes_filters(self._listing(title="SKODA ENYAQ IV 60"), [], ["iv 60"]) is False
+        assert s._passes_filters(self._listing(title="skoda enyaq iv 60 58kwh"), [], ["iv 60"]) is False
+
+    def test_exclude_keyword_absent_passes(self):
+        s = self._scraper()
+        listing = self._listing(title="2022 Skoda Enyaq iV 80 82kWh")
+        assert s._passes_filters(listing, [], ["vRS", "Coupe", "iV 60"]) is True
+
+    def test_multiple_excludes_any_match_rejects(self):
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq vRS Coupe 2023")
+        assert s._passes_filters(listing, [], ["iv 60", "vrs", "coupe"]) is False
+
+    def test_require_keyword_present_passes(self):
+        s = self._scraper()
+        listing = self._listing(title="Kia EV6 GT-Line RWD 77kWh")
+        assert s._passes_filters(listing, ["77kwh"], []) is True
+
+    def test_require_keyword_missing_rejected(self):
+        s = self._scraper()
+        listing = self._listing(title="Kia EV6 GT-Line RWD 58kWh")
+        assert s._passes_filters(listing, ["77kwh"], []) is False
+
+    def test_require_title_lowercased_for_matching(self):
+        """combined is lowercased so require keyword (pre-lowercased by caller) matches any title casing."""
+        s = self._scraper()
+        assert s._passes_filters(self._listing(title="Kia EV6 GT-Line 77kWh"), ["77kwh"], []) is True
+        assert s._passes_filters(self._listing(title="KIA EV6 GT-LINE 77KWH"), ["77kwh"], []) is True
+
+    def test_require_multiple_all_must_match(self):
+        s = self._scraper()
+        listing = self._listing(title="Kia EV6 GT-Line RWD 77kWh")
+        assert s._passes_filters(listing, ["77kwh", "rwd"], []) is True
+        assert s._passes_filters(listing, ["77kwh", "awd"], []) is False
+
+    def test_require_and_exclude_both_applied(self):
+        """Require passes but exclude hits → listing rejected."""
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq iV 60 58kWh")
+        # Require "enyaq" (present) but exclude "iv 60" (also present)
+        assert s._passes_filters(listing, ["enyaq"], ["iv 60"]) is False
+
+    def test_exclude_keyword_in_spec_not_title(self):
+        """Exclusion in spec_summary works even when title is clean."""
+        s = self._scraper()
+        listing = self._listing(
+            title="Skoda Enyaq 2022",
+            spec_summary="Standard Range | iV 60 | 58kWh"
+        )
+        assert s._passes_filters(listing, [], ["iv 60"]) is False
+
+    def test_short_title_no_crash(self):
+        """Edge case: very short or empty title should not raise."""
+        s = self._scraper()
+        assert s._passes_filters(self._listing(title=""), [], ["iv 60"]) is True
+        assert s._passes_filters(self._listing(title="Ok"), [], []) is True
