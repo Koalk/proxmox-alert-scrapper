@@ -93,6 +93,31 @@ searches:
     require_keywords: []
     exclude_keywords: ["ID.4 GTX"]  # AWD variant tends to be overpriced
 
+  - name: "Kia EV3"
+    enabled: true
+    autotrader:
+      make: "Kia"
+      model: "EV3"
+      price_max: 30000
+      radius: 200
+      year_from: 2025
+      mileage_max: 20000  # only low-mileage ex-demo/early returns
+    require_keywords: []
+    # Note: 460L boot is smaller than ideal for 2 dogs — watch but don't exclude
+    exclude_keywords: ["Standard Range"]  # want the 81kWh not the 58kWh
+
+  - name: "Kia EV5 (Watch)"
+    enabled: true
+    autotrader:
+      make: "Kia"
+      model: "EV5"
+      price_max: 33000
+      radius: 200
+      year_from: 2025
+      mileage_max: 20000
+    require_keywords: []
+    exclude_keywords: []
+
   - name: "BMW iX3"
     enabled: true
     autotrader:
