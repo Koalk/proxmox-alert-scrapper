@@ -58,15 +58,17 @@ searches:
     autotrader:
       make: "Skoda"
       model: "Enyaq"
-      price_max: 18000
-    require_keywords: ["82kWh", "80"]
-    exclude_keywords: ["60kWh", "iV 60"]
+      price_max: 22000
+      radius: 200
+    require_keywords: []
+    exclude_keywords: ["iV 60", "60kWh", "vRS", "Coupe"]
 
   - name: "Hyundai Ioniq 5"
     enabled: false
     autotrader:
       make: "Hyundai"
       model: "Ioniq 5"
-      price_max: 22000
+      price_max: 20000
+      mileage_max: 40000
     require_keywords: []
     exclude_keywords: []

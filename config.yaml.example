@@ -54,12 +54,13 @@ searches:
     autotrader:
       make: "Skoda"
       model: "Enyaq"
-      price_max: 18000
-    # Additional keyword filters applied to listing title/spec text
-    # ALL must be present (case-insensitive) for listing to be included
-    require_keywords: ["82kWh", "80"]
+      price_max: 22000
+      radius: 200         # wider net — thin stock in Scotland
+    # require_keywords left empty — spec_summary extraction is unreliable;
+    # use exclude_keywords only until selector is verified working
+    require_keywords: []
     # If ANY of these appear, listing is skipped
-    exclude_keywords: ["60kWh", "iV 60"]
+    exclude_keywords: ["iV 60", "60kWh", "vRS", "Coupe"]
 
   - name: "Kia EV6"
     enabled: true
@@ -67,6 +68,7 @@ searches:
       make: "Kia"
       model: "EV6"
       price_max: 22000
+      mileage_max: 70000  # slightly tighter than default — some PCO exposure
     require_keywords: []
     exclude_keywords: ["GT"]   # GT is rare and overpriced used
 
@@ -75,18 +77,21 @@ searches:
     autotrader:
       make: "Hyundai"
       model: "Ioniq 5"
-      price_max: 22000
+      price_max: 20000
+      mileage_max: 40000  # tighter than default — heavy Uber/PCO use in UK
     require_keywords: []
     exclude_keywords: []
 
-  - name: "VW ID.4 Pro"
+  - name: "VW ID.4"
     enabled: true
     autotrader:
       make: "Volkswagen"
       model: "ID.4"
-      price_max: 18000
-    require_keywords: ["Pro"]
-    exclude_keywords: []
+      price_max: 20000
+      radius: 200
+    # require_keywords dropped — spec_summary unreliable; price filters Pro anyway
+    require_keywords: []
+    exclude_keywords: ["ID.4 GTX"]  # AWD variant tends to be overpriced
 
   - name: "BMW iX3"
     enabled: true
