@@ -273,8 +273,13 @@ class ListingDatabase:
                     scraped_at      = NULL
                 WHERE listing_id IN ({placeholders})
             """, listing_ids)
-            # Reclaim disk space freed by the NULL updates
-            conn.execute("VACUUM")
+        # VACUUM cannot run inside a transaction — use a fresh autocommit connection
+        vacuum_conn = sqlite3.connect(self.db_path)
+        try:
+            vacuum_conn.isolation_level = None
+            vacuum_conn.execute("VACUUM")
+        finally:
+            vacuum_conn.close()
 
     def get_all_active(self) -> list[dict]:
         """Return all listings that still have full data (not yet stripped after send)."""

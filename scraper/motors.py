@@ -49,7 +49,7 @@ _MODEL_OVERRIDES: dict[str, str] = {
     "ID.4":      "ID.4",
     "ID.5":      "ID.5",
     "Sealion 7": "Sealion+7", # two words
-    "EV6":       "EV6",       # one word, no space
+    "EV6":       "EV+6",      # Motors uses 'EV 6' (two tokens)
     "EV3":       "EV3",       # one word, no space
     "iX3":       "iX3",
 }
