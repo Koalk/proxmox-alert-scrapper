@@ -61,7 +61,7 @@ searches:
       price_max: 22000
       radius: 200
     require_keywords: []
-    exclude_keywords: ["iV 60", "60kWh", "vRS", "Coupe"]
+    exclude_keywords: ["iV 60", "60kWh", "vRS", "Coupe", "coupé", "Enyaq 60", "55kWh"]
 
   - name: "Hyundai Ioniq 5"
     enabled: false

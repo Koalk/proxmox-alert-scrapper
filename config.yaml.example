@@ -62,7 +62,7 @@ searches:
     # use exclude_keywords only until selector is verified working
     require_keywords: []
     # If ANY of these appear, listing is skipped
-    exclude_keywords: ["iV 60", "60kWh", "vRS", "Coupe"]
+    exclude_keywords: ["iV 60", "60kWh", "vRS", "Coupe", "coupé", "Enyaq 60", "55kWh"]
 
   - name: "Kia EV6"
     enabled: true
