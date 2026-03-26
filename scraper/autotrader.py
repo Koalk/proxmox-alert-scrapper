@@ -569,6 +569,14 @@ class AutoTraderScraper:
                     break
             except Exception:
                 pass
+        # Fallback: parse location from the page title when the selector returns nothing.
+        # e.g. "2023 White Skoda Enyaq for sale for £11,552 in Wetherby, LEEDS"
+        # Stopgap until the proper CSS selector is verified working.
+        if not location and title:
+            in_match = re.search(r" in (.+)$", title)
+            if in_match:
+                location = in_match.group(1).strip()
+
         dist_m = re.search(r"(\d+)\s*miles?\s*away", location, re.I)
         distance_miles = int(dist_m.group(1)) if dist_m else None
 
