@@ -81,7 +81,7 @@ searches:
       model: "Ioniq 5"
       price_max: 20000
       mileage_max: 40000  # tighter than default — heavy Uber/PCO use in UK
-    require_keywords: []
+    require_keywords: ["IONIQ 5"]  # prevents old Ioniq hatchback and unrelated models (Tucson etc)
     exclude_keywords: []
 
   - name: "VW ID.4"
@@ -92,7 +92,7 @@ searches:
       price_max: 20000
       radius: 200
     # require_keywords dropped — spec_summary unreliable; price filters Pro anyway
-    require_keywords: []
+    require_keywords: ["ID.4"]  # prevents ID.3, VW up!, Transporter and other VW EVs leaking in
     exclude_keywords: ["ID.4 GTX"]  # AWD variant tends to be overpriced
 
   - name: "Kia EV3"
@@ -126,7 +126,7 @@ searches:
       make: "BMW"
       model: "iX3"
       price_max: 23000
-    require_keywords: []
+    require_keywords: ["iX3"]  # prevents BMW i3 (city car) bleeding into results
     exclude_keywords: []
 
   - name: "BYD Sealion 7 (Watch)"

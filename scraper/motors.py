@@ -219,12 +219,19 @@ class MotorsScraper:
             if not listing:
                 continue
             combined = f"{listing.title} {listing.spec_summary}".lower()
-            # Motors search filtering is unreliable — reject cards where neither
-            # the make nor the model name appears anywhere in the card text.
-            if expected_make or expected_model:
-                if expected_make not in combined and expected_model not in combined:
+            # Motors search params are often ignored — reject cards that don't
+            # match the expected model (when specified) or make (when model is absent).
+            # Require model presence independently of make: a card with the right make
+            # but wrong model (e.g. Hyundai Tucson under Ioniq 5 search) must be rejected.
+            if expected_model:
+                if expected_model not in combined:
                     rejected_make += 1
-                    logger.debug(f"  Skipping: '{listing.title[:50]}'")
+                    logger.debug(f"  Skipping (wrong model): '{listing.title[:50]}'")
+                    continue
+            elif expected_make:
+                if expected_make not in combined:
+                    rejected_make += 1
+                    logger.debug(f"  Skipping (wrong make): '{listing.title[:50]}'")
                     continue
             if known_ids and listing.listing_id in known_ids:
                 continue

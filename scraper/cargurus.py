@@ -50,13 +50,14 @@ _DEAL_RATINGS = {
 # model_id=None means make-only search filtered to electric via fuelTypes param.
 _MAKE_MODELS: dict[tuple, tuple] = {
     ("Kia",        "EV6"):      ("m306", "d6251"),
-    ("Hyundai",    "Ioniq 5"):  ("m279", None),
+    ("Hyundai",    "Ioniq 5"):  ("m279", "d6229"),
     ("Skoda",      "Enyaq"):    ("m207", None),
     ("Volkswagen", "ID.3"):     ("m203", "d6006"),
-    ("Volkswagen", "ID.4"):     ("m203", None),
+    ("Volkswagen", "ID.4"):     ("m203", "d6206"),
     ("Volkswagen", "ID.5"):     ("m203", None),
     ("Tesla",      "Model 3"):  ("m266", "d5176"),
     ("Tesla",      "Model Y"):  ("m266", "d6299"),
+    ("BMW",        "iX3"):      ("m256", "d6213"),
     ("BMW",        None):       ("m256", None),
     ("BYD",        None):       ("m451", None),
     ("Mercedes",   None):       ("m297", None),
