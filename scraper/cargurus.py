@@ -455,6 +455,16 @@ class CarGurusScraper:
         if y:
             year = int(y.group(1))
 
+        # Parse location: CarGurus returns "City\nX mi away" in a single text node.
+        # Split so location shows just the city and distance_miles is a number.
+        location_parts = location.split("\n", 1)
+        city = location_parts[0].strip()
+        distance_miles: Optional[int] = None
+        if len(location_parts) > 1:
+            dm = re.search(r"(\d+)\s*mi", location_parts[1])
+            if dm:
+                distance_miles = int(dm.group(1))
+
         # Deal rating flag
         deal_flag = ""
         for key, label in _DEAL_RATINGS.items():
@@ -482,10 +492,10 @@ class CarGurusScraper:
             price=price,
             year=year,
             mileage=mileage,
-            location=location,
-            distance_miles=None,
+            location=city,
+            distance_miles=distance_miles,
             seller_type="dealer",
-            seller_name=location,
+            seller_name=city,
             spec_summary="",
             url=link or "https://www.cargurus.co.uk",
             source="cargurus",

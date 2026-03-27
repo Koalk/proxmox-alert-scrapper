@@ -14,7 +14,7 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scraper.autotrader import AutoTraderScraper, build_autotrader_url, Listing
-from scraper.cargurus  import build_cargurus_url, _get_make_model_ids
+from scraper.cargurus  import build_cargurus_url, _get_make_model_ids, CarGurusScraper
 from scraper.motors    import build_motors_url, MotorsScraper
 from scraper.database  import ListingDatabase
 from scraper.emailer   import build_html_email, _car_card
@@ -613,11 +613,11 @@ class TestBuildCarGurusUrl:
         assert "maxPrice=30000" in url
 
     def test_make_only_fallback_uses_fueltype(self):
-        cfg = dict(self._CFG, make="Hyundai", model="Ioniq 5")
+        # BYD has only a make-level entry (no per-model ID), so it uses fuelTypes filter
+        cfg = dict(self._CFG, make="BYD", model="Atto 3")
         url = build_cargurus_url(cfg)
         assert "fuelTypes=ELECTRIC" in url
-        assert "makeModelTrimPaths=m279" in url
-        assert "makeModelTrimPaths" in url
+        assert "makeModelTrimPaths=m451" in url
         assert url.count("makeModelTrimPaths") == 1
 
     def test_unknown_make_returns_empty(self):
@@ -630,8 +630,15 @@ class TestBuildCarGurusUrl:
         assert make_id == "m306"
         assert model_id == "d6251"
 
-    def test_get_make_model_ids_make_only(self):
+    def test_get_make_model_ids_with_model(self):
+        # BMW iX3 has a dedicated model ID in the mapping
         make_id, model_id = _get_make_model_ids("BMW", "iX3")
+        assert make_id == "m256"
+        assert model_id == "d6213"
+
+    def test_get_make_model_ids_make_only_fallback(self):
+        # BMW with unknown model falls back to the (BMW, None) wildcard entry
+        make_id, model_id = _get_make_model_ids("BMW", "M3")
         assert make_id == "m256"
         assert model_id is None
 
@@ -931,3 +938,105 @@ class TestPassesFilters:
         s = self._scraper()
         assert s._passes_filters(self._listing(title=""), [], ["iv 60"]) is True
         assert s._passes_filters(self._listing(title="Ok"), [], []) is True
+
+
+# ---------------------------------------------------------------------------
+# CarGurus scraper — _card_to_listing (location / seller_name parsing)
+# ---------------------------------------------------------------------------
+
+class TestCarGurusCardToListing:
+    def _scraper(self):
+        return CarGurusScraper({"limits": {}})
+
+    def _card(self, **kwargs):
+        base = {
+            "title":    "2022 Kia EV6",
+            "price":    "£21,498",
+            "mileage":  "25,235 miles",
+            "location": "Washington\n95 mi away",
+            "deal":     "Fair Deal",
+            "link":     "https://www.cargurus.co.uk/Cars/inventorylisting/vdp.action?listingId=157132176",
+            "img":      "https://static-eu.cargurus.com/images/car.jpg",
+        }
+        base.update(kwargs)
+        return base
+
+    def test_location_city_only(self):
+        """location field should contain only the city, not the distance text."""
+        l = self._scraper()._card_to_listing(self._card(), "Kia EV6")
+        assert l.location == "Washington"
+
+    def test_distance_parsed_from_location(self):
+        """Distance in miles should be extracted from the 'X mi away' part."""
+        l = self._scraper()._card_to_listing(self._card(), "Kia EV6")
+        assert l.distance_miles == 95
+
+    def test_seller_name_is_city_not_full_location(self):
+        """seller_name must be just the city, not 'City\nX mi away'."""
+        l = self._scraper()._card_to_listing(self._card(), "Kia EV6")
+        assert l.seller_name == "Washington"
+        assert "\n" not in l.seller_name
+        assert "mi away" not in l.seller_name
+
+    def test_location_without_distance(self):
+        """Location with no newline/distance suffix should work cleanly."""
+        l = self._scraper()._card_to_listing(self._card(location="Edinburgh"), "Kia EV6")
+        assert l.location == "Edinburgh"
+        assert l.seller_name == "Edinburgh"
+        assert l.distance_miles is None
+
+    def test_location_empty(self):
+        l = self._scraper()._card_to_listing(self._card(location=""), "Kia EV6")
+        assert l.location == ""
+        assert l.seller_name == ""
+        assert l.distance_miles is None
+
+    def test_price_parsed(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.price == 21498
+
+    def test_mileage_parsed(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.mileage == 25235
+
+    def test_year_extracted_from_title(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.year == 2022
+
+    def test_listing_id_from_url(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.listing_id == "cg_157132176"
+
+    def test_source_is_cargurus(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.source == "cargurus"
+
+    def test_deal_rating_in_attention_check(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert "Fair Deal" in l.attention_check
+
+    def test_low_mileage_flag(self):
+        l = self._scraper()._card_to_listing(self._card(mileage="12,000 miles"), "x")
+        assert "Low mileage" in l.attention_check
+
+    def test_high_mileage_flag(self):
+        l = self._scraper()._card_to_listing(self._card(mileage="95,000 miles"), "x")
+        assert "High mileage" in l.attention_check
+
+    def test_none_on_empty_card(self):
+        l = self._scraper()._card_to_listing({"title": "", "link": ""}, "x")
+        assert l is None
+
+    def test_relative_url_made_absolute(self):
+        l = self._scraper()._card_to_listing(
+            self._card(link="/Cars/inventorylisting/vdp.action?listingId=999"), "x"
+        )
+        assert l.url.startswith("https://www.cargurus.co.uk")
+
+    def test_image_url_included(self):
+        l = self._scraper()._card_to_listing(self._card(), "x")
+        assert l.image_urls == ["https://static-eu.cargurus.com/images/car.jpg"]
+
+    def test_search_name_stored(self):
+        l = self._scraper()._card_to_listing(self._card(), "Kia EV6")
+        assert l.search_name == "Kia EV6"
