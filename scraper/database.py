@@ -308,6 +308,17 @@ class ListingDatabase:
         finally:
             vacuum_conn.close()
 
+    def delete_listings(self, listing_ids: list[str]):
+        """Permanently delete listings from the DB (used to remove cross-source duplicates)."""
+        if not listing_ids:
+            return
+        placeholders = ",".join("?" * len(listing_ids))
+        with self._connect() as conn:
+            conn.execute(
+                f"DELETE FROM listings WHERE listing_id IN ({placeholders})",
+                listing_ids,
+            )
+
     def get_all_active(self) -> list[dict]:
         """Return all listings that still have full data (not yet stripped after send)."""
         with self._connect() as conn:

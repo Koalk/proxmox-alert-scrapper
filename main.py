@@ -7,7 +7,7 @@ RUN FLOW:
     → AutoTraderScraper.scrape_all()   (on_search_done=_save_partial)
     → MotorsScraper.scrape_all()       (results saved via _save_partial too)
     → CarGurusScraper.scrape_all()     (results saved via _save_partial too)
-    → dedup_across_sources()           AT wins; dedup key=(price, mileage, title[:20])
+    → dedup_across_sources()           AT wins; dedup key=(year, price, mileage)
     → db.get_unsent_listings()         new + price-changed rows where email_sent=0
     → send_email()                     marks rows sent + strips raw data
     → JSON export to output.json_path
@@ -138,8 +138,10 @@ def check_for_update(install_dir: str) -> dict | None:
 
 def dedup_across_sources(listings: list) -> list:
     """
-    Remove cross-source duplicates by matching on (price, mileage, title prefix).
+    Remove cross-source duplicates by matching on (year, price, mileage).
     AutoTrader listings take precedence (richer data) over all other sources.
+    Title is intentionally excluded: AT titles ("2022 White 2022 Kia EV6...") and
+    CG/Motors titles ("2022 Kia EV6") differ too much to be a reliable key.
     """
     at_listings    = [l for l in listings if l.source == "autotrader"]
     other_listings = [l for l in listings if l.source != "autotrader"]
@@ -147,15 +149,15 @@ def dedup_across_sources(listings: list) -> list:
     at_keys: set = set()
     for l in at_listings:
         # Only use as dedup key when both price and mileage are known —
-        # otherwise (None, None, title) wrongly matches Motors listings for same model
+        # (None, None) would falsely match unrelated listings for the same model
         if l.price is not None and l.mileage is not None:
-            key = (l.price, l.mileage, l.title[:20].lower())
+            key = (l.year, l.price, l.mileage)
             at_keys.add(key)
 
     unique_other = []
     for l in other_listings:
         if l.price is not None and l.mileage is not None:
-            key = (l.price, l.mileage, l.title[:20].lower())
+            key = (l.year, l.price, l.mileage)
             if key in at_keys:
                 continue
         unique_other.append(l)
@@ -342,9 +344,19 @@ async def main():
                 l for l in dedup_across_sources(at_results + cg_results)
                 if l.source == "cargurus"
             ]
+            # CG was already saved to DB via _save_partial callbacks, so
+            # explicitly delete any duplicates that were just deduped away.
+            unique_cg_ids = {l.listing_id for l in unique_cg}
+            duped_cg_ids  = [
+                l.listing_id for l in cg_results
+                if l.listing_id not in unique_cg_ids
+            ]
+            if duped_cg_ids:
+                db.delete_listings(duped_cg_ids)
             logger.info(
                 f"CarGurus total: {len(cg_results)} listings "
-                f"({len(unique_cg)} unique after cross-source dedup)"
+                f"({len(unique_cg)} unique after cross-source dedup, "
+                f"{len(duped_cg_ids)} duplicate(s) removed from DB)"
             )
         except Exception as exc:
             msg = f"CarGurus scraper crashed: {exc}"
