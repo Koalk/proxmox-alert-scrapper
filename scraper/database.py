@@ -164,6 +164,23 @@ class ListingDatabase:
                         existing["price"] != listing.price
                         and listing.price is not None
                     )
+                    # Detect re-appearance: listing was outside the 14-day known_ids
+                    # window so the scraper visited it again — possibly a re-posted ad
+                    try:
+                        last_seen_dt = datetime.fromisoformat(existing["last_seen"])
+                        now_dt       = datetime.fromisoformat(now)
+                        days_since   = (now_dt - last_seen_dt).days
+                        re_appeared  = days_since >= 14
+                    except Exception:
+                        days_since  = 0
+                        re_appeared = False
+                    attention_note = listing.attention_check or ""
+                    if re_appeared:
+                        re_flag = f"\u267b\ufe0f Re-listed after ~{days_since}d gap"
+                        attention_note = (
+                            f"{re_flag} | {attention_note}" if attention_note
+                            else re_flag
+                        )
                     conn.execute("""
                         UPDATE listings SET
                             last_seen       = ?,
@@ -194,14 +211,17 @@ class ListingDatabase:
                         listing.seller_name,
                         listing.spec_summary,
                         json.dumps(listing.image_urls),
-                        listing.attention_check,
-                        price_changed,   # reset email_sent only if price changed
+                        attention_note,
+                        price_changed or re_appeared,   # reset email_sent on change or re-list
                         listing.listing_id,
                     ))
                     if price_changed:
                         old_price = existing['price']
                         old_str = f"£{old_price:,}" if old_price is not None else "unknown"
                         listing.attention_check += f" | 💲 Price changed from {old_str}"
+                        updated_listings.append(listing)
+                    elif re_appeared:
+                        listing.attention_check = attention_note
                         updated_listings.append(listing)
 
         return new_listings, updated_listings
@@ -221,10 +241,17 @@ class ListingDatabase:
                 result.append(d)
             return result
 
-    def get_known_listing_ids(self) -> set[str]:
-        """Return all listing IDs currently stored in the database."""
+    def get_known_listing_ids(self, max_age_days: int = 14) -> set[str]:
+        """Return listing IDs last seen within max_age_days.
+        Older IDs are excluded so the scraper re-discovers (and re-flags) them."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        ).isoformat()
         with self._connect() as conn:
-            rows = conn.execute("SELECT listing_id FROM listings").fetchall()
+            rows = conn.execute(
+                "SELECT listing_id FROM listings WHERE last_seen >= ?",
+                (cutoff,)
+            ).fetchall()
             return {row[0] for row in rows}
 
     def get_searches_with_recent_unsent(self, max_age_hours: int = 20) -> set[str]:
