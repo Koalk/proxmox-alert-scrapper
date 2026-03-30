@@ -74,6 +74,11 @@ class ListingDatabase:
                     total_found  INTEGER,
                     new_count    INTEGER
                 );
+
+                CREATE TABLE IF NOT EXISTS discarded_listings (
+                    listing_id   TEXT PRIMARY KEY,
+                    discarded_at TEXT NOT NULL
+                );
             """)
             # Migrate existing databases
             existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(listings)")}
@@ -85,7 +90,11 @@ class ListingDatabase:
     def reset(self):
         """Drop and recreate all tables. Wipes everything — use with care."""
         with self._connect() as conn:
-            conn.executescript("DROP TABLE IF EXISTS listings; DROP TABLE IF EXISTS run_log;")
+            conn.executescript(
+                "DROP TABLE IF EXISTS listings; "
+                "DROP TABLE IF EXISTS run_log; "
+                "DROP TABLE IF EXISTS discarded_listings;"
+            )
         self._init_db()
 
     def mark_all_unsent(self):
@@ -246,7 +255,8 @@ class ListingDatabase:
             return result
 
     def get_known_listing_ids(self, max_age_days: int = 14) -> set[str]:
-        """Return listing IDs last seen within max_age_days.
+        """Return listing IDs last seen within max_age_days, plus IDs that were
+        filtered out by keyword rules within the same window (discarded_listings).
         Older IDs are excluded so the scraper re-discovers (and re-flags) them."""
         cutoff = (
             datetime.now(timezone.utc) - timedelta(days=max_age_days)
@@ -256,7 +266,30 @@ class ListingDatabase:
                 "SELECT listing_id FROM listings WHERE last_seen >= ?",
                 (cutoff,)
             ).fetchall()
-            return {row[0] for row in rows}
+            discarded = conn.execute(
+                "SELECT listing_id FROM discarded_listings WHERE discarded_at >= ?",
+                (cutoff,)
+            ).fetchall()
+            # Prune entries older than the cutoff to keep the table compact
+            conn.execute(
+                "DELETE FROM discarded_listings WHERE discarded_at < ?", (cutoff,)
+            )
+            return {row[0] for row in rows} | {row[0] for row in discarded}
+
+    def record_discarded(self, listing_ids: list[str]):
+        """Persist filtered-out listing IDs so future runs skip their detail pages.
+        These IDs are returned by get_known_listing_ids() within the 14-day window,
+        so the scraper treats them like already-seen listings and skips page fetches."""
+        if not listing_ids:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO discarded_listings "
+                "(listing_id, discarded_at) VALUES (?, ?)",
+                [(lid, now) for lid in listing_ids],
+            )
+        logger.debug(f"Recorded {len(listing_ids)} discarded listing ID(s)")
 
     def get_searches_with_recent_unsent(self, max_age_hours: int = 20) -> set[str]:
         """

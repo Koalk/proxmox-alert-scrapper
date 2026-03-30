@@ -1201,3 +1201,168 @@ class TestCarGurusModelFilter:
         titles = [r.title for r in results]
         assert len(results) == 1, f"Expected only BMW, got: {titles}"
         assert "BMW" in results[0].title
+
+
+# ---------------------------------------------------------------------------
+# Regression: filter_text broadens keyword matching  (Bug fix: autotrader.py)
+# ---------------------------------------------------------------------------
+# When AutoTrader renders a listing with a generic tab title like
+# "2021 Black Skoda Enyaq for sale for £14,594" the variant ("iV 60", "58kWh")
+# is NOT in the title and spec_summary is often empty too. filter_text pulls
+# the rich heading/description/spec text from the detail page via JS and gives
+# _passes_filters a richer corpus to check against.
+# ---------------------------------------------------------------------------
+
+class TestFilterText:
+    def _scraper(self):
+        return AutoTraderScraper({"limits": {}})
+
+    def _listing(self, title="", spec_summary="", filter_text=""):
+        return Listing(
+            listing_id="test_1", title=title, price=18000, year=2022,
+            mileage=30000, location="Edinburgh", distance_miles=5,
+            seller_type="dealer", seller_name="Dealer", spec_summary=spec_summary,
+            url="https://www.autotrader.co.uk/car-details/test_1",
+            filter_text=filter_text,
+        )
+
+    def test_exclude_keyword_in_filter_text_rejected(self):
+        """Core regression: generic tab title + spec variant only in filter_text."""
+        s = self._scraper()
+        listing = self._listing(
+            title="2021 Black 2021 Skoda Enyaq for sale for £14,594 in Bootle",
+            spec_summary="",
+            filter_text="Skoda Enyaq iV 60 58kWh 132PS | Manual",
+        )
+        assert s._passes_filters(listing, [], ["iv 60"]) is False
+
+    def test_exclude_keyword_in_filter_text_kwh_variant(self):
+        """58kWh exclusion works via filter_text even with generic title.
+        Note: the iV 60 has a 58kWh battery; AutoTrader lists it as '58kWh' not '60kWh'."""
+        s = self._scraper()
+        listing = self._listing(
+            title="2021 Blue Skoda Enyaq for sale for £12,500",
+            spec_summary="",
+            filter_text="Enyaq iV 60 58kWh Electric",
+        )
+        assert s._passes_filters(listing, [], ["58kwh"]) is False
+        assert s._passes_filters(listing, [], ["iv 60"]) is False
+
+    def test_correct_variant_not_excluded(self):
+        """iV 80 must NOT be rejected by the iV 60 rule, even via filter_text."""
+        s = self._scraper()
+        listing = self._listing(
+            title="2022 White 2022 Skoda Enyaq for sale for £18,500",
+            spec_summary="",
+            filter_text="Enyaq iV 80 82kWh | 204PS | AWD",
+        )
+        assert s._passes_filters(listing, [], ["iv 60", "enyaq 60", "58kwh"]) is True
+
+    def test_filter_text_does_not_appear_in_to_dict(self):
+        """filter_text must be excluded from serialised output."""
+        listing = self._listing(
+            title="Generic title", filter_text="iV 60 58kWh"
+        )
+        d = listing.to_dict()
+        assert "filter_text" not in d
+
+    def test_filter_text_default_empty(self):
+        """Existing code constructing Listing without filter_text is unaffected."""
+        listing = Listing(
+            listing_id="x", title="Test", price=None, year=None, mileage=None,
+            location="", distance_miles=None, seller_type="dealer",
+            seller_name="", spec_summary="", url="https://example.com",
+        )
+        assert listing.filter_text == ""
+
+    def test_require_keyword_found_in_filter_text(self):
+        """require_keywords match against filter_text when title is generic."""
+        s = self._scraper()
+        listing = self._listing(
+            title="2022 Grey Hyundai IONIQ 5 for sale for £19,000",
+            spec_summary="",
+            filter_text="IONIQ 5 73kWh RWD | Luxury trim",
+        )
+        assert s._passes_filters(listing, ["ioniq 5"], []) is True
+
+    def test_require_keyword_absent_from_all_fields_rejected(self):
+        """If require keyword isn't in title, spec_summary, or filter_text → reject."""
+        s = self._scraper()
+        listing = self._listing(
+            title="2022 Grey Hyundai car for sale for £19,000",
+            spec_summary="",
+            filter_text="Tucson 2.0 diesel",
+        )
+        assert s._passes_filters(listing, ["ioniq 5"], []) is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: discarded_listings DB table  (Bug fix: database.py)
+# ---------------------------------------------------------------------------
+
+class TestDiscardedListings:
+    def _db(self):
+        tmp = tempfile.mkdtemp()
+        return ListingDatabase(f"{tmp}/test.db")
+
+    def test_record_discarded_stores_ids(self):
+        db = self._db()
+        db.record_discarded(["AT123", "AT456"])
+        known = db.get_known_listing_ids()
+        assert "AT123" in known
+        assert "AT456" in known
+
+    def test_discarded_ids_in_known_ids(self):
+        """Discarded IDs must appear in get_known_listing_ids so pages can be skipped."""
+        db = self._db()
+        db.record_discarded(["DISC1"])
+        assert "DISC1" in db.get_known_listing_ids()
+
+    def test_record_discarded_empty_list_is_safe(self):
+        db = self._db()
+        db.record_discarded([])   # should not raise
+
+    def test_record_discarded_idempotent(self):
+        """Re-recording the same ID twice does not raise or duplicate."""
+        db = self._db()
+        db.record_discarded(["DUP1"])
+        db.record_discarded(["DUP1"])   # INSERT OR IGNORE
+        known = db.get_known_listing_ids()
+        assert "DUP1" in known
+
+    def test_discarded_ids_pruned_after_cutoff(self):
+        """IDs discarded more than max_age_days ago must not appear in known_ids."""
+        db = self._db()
+        db.record_discarded(["OLD1"])
+        # Back-date the entry
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE discarded_listings SET discarded_at = ? WHERE listing_id = 'OLD1'",
+                (old_ts,)
+            )
+        # get_known_listing_ids prunes entries older than max_age_days (14)
+        known = db.get_known_listing_ids(max_age_days=14)
+        assert "OLD1" not in known
+
+    def test_recent_discarded_ids_kept(self):
+        """IDs discarded within max_age_days must remain in known_ids."""
+        db = self._db()
+        db.record_discarded(["RECENT1"])
+        known = db.get_known_listing_ids(max_age_days=14)
+        assert "RECENT1" in known
+
+    def test_known_ids_union_of_listings_and_discarded(self):
+        """known_ids = recent DB listings ∪ recent discarded listings."""
+        db = self._db()
+        listing = Listing(
+            listing_id="REAL1", title="Kia EV6", price=18000, year=2022,
+            mileage=30000, location="Edinburgh", distance_miles=5,
+            seller_type="dealer", seller_name="Dealer",
+            spec_summary="", url="https://example.com", search_name="Kia EV6",
+        )
+        db.process_listings([listing])
+        db.record_discarded(["DISC1"])
+        known = db.get_known_listing_ids()
+        assert "REAL1" in known
+        assert "DISC1" in known

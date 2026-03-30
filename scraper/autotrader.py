@@ -55,6 +55,32 @@ _STEALTH_JS = """
 }
 """
 
+# Extracts variant/spec/description text from THIS listing's own content sections
+# for keyword filter evaluation.  Intentionally avoids the full page body to
+# prevent false-positive exclusions from "similar cars" recommendation carousels
+# which often reference other variants (e.g. an iV 80 page showing iV 60 suggestions).
+_JS_FILTER_TEXT = """
+() => {
+    const sels = [
+        '[data-testid="advert-title"]',
+        '[data-testid="advert-description"]',
+        '[data-testid="spec-list"]',
+        '[class*="advert__description"]',
+        '[class*="vehicleDescription"]',
+        '[class*="VehicleDescription"]',
+        '[class*="key-specs"]',
+    ];
+    const parts = [];
+    for (const s of sels) {
+        try {
+            const el = document.querySelector(s);
+            if (el) parts.push(el.innerText || el.textContent || '');
+        } catch(e) {}
+    }
+    return parts.join(' ').slice(0, 2000);
+}
+"""
+
 
 @dataclass
 class Listing:
@@ -74,9 +100,14 @@ class Listing:
     attention_check: str = ""
     search_name: str = ""
     scraped_at: str = ""
+    # Transient — populated during detail-page scrape for keyword filter evaluation only.
+    # NOT stored in the database or included in JSON exports.
+    filter_text: str = field(default="", repr=False, compare=False)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("filter_text", None)   # transient — not in DB or JSON exports
+        return d
 
 
 def _jitter(base: float, factor: float = 0.3) -> float:
@@ -119,7 +150,7 @@ class AutoTraderScraper:
     # Public
     # ------------------------------------------------------------------
 
-    async def scrape_all(self, searches: list, on_search_done=None, known_ids=None) -> list:
+    async def scrape_all(self, searches: list, on_search_done=None, known_ids=None, on_discarded=None) -> list:
         """Run all enabled searches sequentially, single browser instance."""
         all_listings = []
         async with async_playwright() as p:
@@ -168,7 +199,7 @@ class AutoTraderScraper:
                     f"[AutoTrader {i+1}/{len(searches)}] {search['name']}"
                 )
                 try:
-                    results = await self._scrape_search(context, search, known_ids=known_ids)
+                    results = await self._scrape_search(context, search, known_ids=known_ids, on_discarded=on_discarded)
                     all_listings.extend(results)
                     logger.info(
                         f"  → {len(results)} listings for {search['name']}"
@@ -198,7 +229,7 @@ class AutoTraderScraper:
     # ------------------------------------------------------------------
 
     async def _scrape_search(
-        self, context: BrowserContext, search: dict, known_ids: set | None = None
+        self, context: BrowserContext, search: dict, known_ids: set | None = None, on_discarded=None
     ) -> list:
         listings = []
         at_cfg   = search["autotrader"]
@@ -255,6 +286,21 @@ class AutoTraderScraper:
                     page_num += 1
                     continue
 
+            # Skip individual URLs whose IDs are already known/discarded.
+            # The page-level check above skips whole pages; this avoids fetching
+            # detail pages for already-known IDs on mixed (some new, some old) pages.
+            if known_ids is not None:
+                before = len(listing_urls)
+                listing_urls = [
+                    u for u in listing_urls
+                    if not (m2 := _id_re.search(u)) or m2.group(1) not in known_ids
+                ]
+                skipped_indiv = before - len(listing_urls)
+                if skipped_indiv:
+                    logger.debug(
+                        f"  Skipped {skipped_indiv} already-known/discarded listing(s)"
+                    )
+
             # Scrape this page's listings concurrently, bounded by max_concurrent_pages.
             # Pre-slice so we never visit more detail pages than max_scrapes allows.
             urls_to_scrape = listing_urls[: min(len(listing_urls), self.max_scrapes)]
@@ -264,7 +310,7 @@ class AutoTraderScraper:
             )
             sem = asyncio.Semaphore(self.max_concurrent_pages)
 
-            async def _scrape_one(listing_url: str) -> "Listing | None":
+            async def _scrape_one(listing_url: str) -> "tuple[Listing | None, str | None]":
                 async with sem:
                     detail = await context.new_page()
                     try:
@@ -279,13 +325,14 @@ class AutoTraderScraper:
                                 f"{price_str} | {mileage_str} | "
                                 f"{result.location[:30]}"
                             )
-                            return result
+                            return result, None
                         if result:
-                            logger.debug(f"    ✗ Filtered out: {result.title[:50]}")
-                        return None
+                            logger.info(f"    ✗ Filtered out: {result.title[:60]}")
+                            return None, result.listing_id   # saved for discard recording
+                        return None, None
                     except Exception as exc:
                         logger.warning(f"    Failed {listing_url}: {exc}")
-                        return None
+                        return None, None
                     finally:
                         try:
                             await detail.close()
@@ -293,8 +340,21 @@ class AutoTraderScraper:
                             pass
                         await asyncio.sleep(_jitter(self.request_delay))
 
-            raw = await asyncio.gather(*[_scrape_one(u) for u in urls_to_scrape])
-            listings = [r for r in raw if r is not None][: self.max_per_search]
+            pairs = await asyncio.gather(*[_scrape_one(u) for u in urls_to_scrape])
+            listings = [r for r, _ in pairs if r is not None][: self.max_per_search]
+            discarded_ids = [d for _, d in pairs if d is not None]
+            if discarded_ids:
+                logger.info(
+                    f"  → {len(discarded_ids)} listing(s) keyword-filtered — "
+                    f"IDs saved so detail pages are skipped on future runs"
+                )
+                if on_discarded is not None:
+                    try:
+                        on_discarded(discarded_ids)
+                    except Exception as cb_exc:
+                        logger.error(
+                            f"on_discarded callback failed: {cb_exc}", exc_info=True
+                        )
 
             # Always stop after scraping one page — one page per search
             break
@@ -302,7 +362,9 @@ class AutoTraderScraper:
         return listings
 
     def _passes_filters(self, listing: Listing, require: list, exclude: list) -> bool:
-        combined = f"{listing.title} {listing.spec_summary}".lower()
+        # Include filter_text (extracted from the listing's own heading/description/spec
+        # sections) so exclude_keywords work even when the browser tab title is generic.
+        combined = f"{listing.title} {listing.spec_summary} {listing.filter_text}".lower()
         if require and not all(k in combined for k in require):
             return False
         if any(k in combined for k in exclude):
@@ -516,6 +578,19 @@ class AutoTraderScraper:
             except Exception:
                 pass
 
+        # ---------- Filter text (keyword matching corpus) ----------
+        # Query THIS listing's own content sections for variant/spec text.
+        # Using targeted JS selectors (not full body) avoids false-positive
+        # exclusions from "similar/recommended cars" carousels on the page.
+        filter_text = ""
+        try:
+            raw_ft = await asyncio.wait_for(
+                page.evaluate(_JS_FILTER_TEXT), timeout=4
+            )
+            filter_text = str(raw_ft or "")
+        except Exception:
+            pass
+
         # ---------- Year, Mileage (from body text fallback) ----------
         try:
             body = await page.inner_text("body", timeout=8000)
@@ -674,6 +749,7 @@ class AutoTraderScraper:
             attention_check=" | ".join(flags),
             search_name=search_name,
             scraped_at=datetime.now(timezone.utc).isoformat(),
+            filter_text=filter_text,
         )
 
     # ------------------------------------------------------------------

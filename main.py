@@ -298,7 +298,8 @@ async def main():
     at_results = []
     try:
         at_results = await AutoTraderScraper(config).scrape_all(
-            searches_to_run, on_search_done=_save_partial, known_ids=known_ids
+            searches_to_run, on_search_done=_save_partial, known_ids=known_ids,
+            on_discarded=db.record_discarded,
         )
         all_scraped.extend(at_results)
         logger.info(f"AutoTrader total: {len(at_results)} listings")
