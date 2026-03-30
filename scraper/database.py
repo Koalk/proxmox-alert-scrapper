@@ -160,9 +160,13 @@ class ListingDatabase:
                     new_listings.append(listing)
                 else:
                     # Seen before — update last_seen and price (may have changed)
+                    # Guard against NULL price in DB (stripped by mark_as_sent):
+                    # None != value is True in Python, which would falsely flag
+                    # every re-scraped sent listing as a price change.
                     price_changed = (
-                        existing["price"] != listing.price
+                        existing["price"] is not None
                         and listing.price is not None
+                        and existing["price"] != listing.price
                     )
                     # Detect re-appearance: listing was outside the 14-day known_ids
                     # window so the scraper visited it again — possibly a re-posted ad

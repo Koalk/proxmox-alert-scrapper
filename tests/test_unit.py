@@ -1040,3 +1040,164 @@ class TestCarGurusCardToListing:
     def test_search_name_stored(self):
         l = self._scraper()._card_to_listing(self._card(), "Kia EV6")
         assert l.search_name == "Kia EV6"
+
+
+# ---------------------------------------------------------------------------
+# Regression: null-price false price-change  (Bug fix: database.py)
+# ---------------------------------------------------------------------------
+# When a listing is first inserted with price=None (extraction failed) and then
+# re-scraped with a real price, the old code evaluated None != 18000 → True and
+# wrongly treated it as a "price change", resetting email_sent=0.
+# ---------------------------------------------------------------------------
+
+class TestNullPriceFalsePriceChange:
+    def _db(self):
+        tmp = tempfile.mkdtemp()
+        return ListingDatabase(f"{tmp}/test.db")
+
+    def _listing(self, listing_id="L1", price=18000):
+        return Listing(
+            listing_id=listing_id, title="Kia EV6 2022", price=price,
+            year=2022, mileage=30000, location="Edinburgh", distance_miles=5,
+            seller_type="dealer", seller_name="EV Cars Ltd",
+            spec_summary="Auto | Electric", url="https://example.com",
+            search_name="Test Search",
+        )
+
+    def test_null_to_real_price_not_flagged_as_price_change(self):
+        """Listing stored with NULL price → re-scraped with real price must NOT
+        be treated as price change (would flood email with already-sent listings)."""
+        db = self._db()
+        # Insert with no price (failed extraction)
+        db.process_listings([self._listing(price=None)])
+        db.mark_as_sent(["L1"])
+        # Re-scrape: extraction now succeeds → real price available
+        # This must NOT trigger price_changed=True
+        _, updated = db.process_listings([self._listing(price=18000)])
+        assert len(updated) == 0, (
+            "A listing with NULL stored price must not produce a price-change "
+            "event — null ≠ value is a false positive from a missing original price"
+        )
+        assert db.get_unsent_listings() == [], (
+            "Re-scraping a sent listing whose stored price was NULL must keep "
+            "email_sent=1, not reset it to 0"
+        )
+
+    def test_real_price_change_still_detected(self):
+        """Genuine price drops must still be detected after the null-price fix."""
+        db = self._db()
+        db.process_listings([self._listing(price=18000)])
+        db.mark_as_sent(["L1"])
+        # Price dropped: this IS a real change and must still be surfaced
+        _, updated = db.process_listings([self._listing(price=17500)])
+        assert len(updated) == 1, "Genuine price drop must still produce an updated listing"
+        unsent = db.get_unsent_listings()
+        assert len(unsent) == 1, "Price-dropped listing must be re-queued for email"
+
+    def test_null_to_null_price_not_flagged(self):
+        """Listing stored with NULL price re-scraped with NULL price: no price change."""
+        db = self._db()
+        db.process_listings([self._listing(price=None)])
+        db.mark_as_sent(["L1"])
+        _, updated = db.process_listings([self._listing(price=None)])
+        assert len(updated) == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression: CarGurus wrong-model passthrough  (Bug fix: cargurus.py)
+# ---------------------------------------------------------------------------
+# When _MAKE_MODELS has no specific model ID for a search (e.g. BYD Sealion 7
+# falls back to the make-only BYD entry), CarGurus returns ALL electric BYD
+# models. Without a model-name check the scraper would forward Atto 3, Seal,
+# Dolphin etc. to the email despite require_keywords=[].
+# ---------------------------------------------------------------------------
+
+class TestCarGurusModelFilter:
+    def _scraper(self):
+        return CarGurusScraper({"limits": {"max_listings_per_search": 20}})
+
+    def _search(self, make, model, require=None, exclude=None):
+        return {
+            "name": f"{make} {model}",
+            "enabled": True,
+            "autotrader": {"make": make, "model": model, "price_max": 30000},
+            "require_keywords": require or [],
+            "exclude_keywords": exclude or [],
+        }
+
+    def _card(self, title):
+        return {
+            "title": title,
+            "price": "£22,000",
+            "mileage": "15,000 miles",
+            "location": "Edinburgh",
+            "deal": "",
+            "link": "https://www.cargurus.co.uk/Cars/inventorylisting/vdp.action?listingId=1",
+            "img": "",
+        }
+
+    async def _run_scrape_search(self, scraper, search, cards):
+        """Helper: patch _get_listing_cards so no browser is needed."""
+        from unittest.mock import AsyncMock, patch, MagicMock
+
+        mock_page = AsyncMock()
+        mock_context = MagicMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+
+        with patch.object(scraper, "_get_listing_cards", new=AsyncMock(side_effect=[cards, []])):
+            return await scraper._scrape_search(mock_context, search)
+
+    def test_wrong_model_filtered_out(self):
+        """BYD Atto 3, Seal, Dolphin must be rejected when searching for Sealion 7."""
+        import asyncio
+        scraper = self._scraper()
+        search  = self._search("BYD", "Sealion 7")
+        cards   = [
+            self._card("2024 BYD Atto 3 60.5kWh"),
+            self._card("2024 BYD Seal AWD"),
+            self._card("2024 BYD Sealion 7 AWD 82kWh"),
+            self._card("2023 BYD Dolphin"),
+        ]
+        results = asyncio.run(self._run_scrape_search(scraper, search, cards))
+        titles = [r.title for r in results]
+        assert len(results) == 1, f"Expected 1 result (Sealion 7 only), got: {titles}"
+        assert "Sealion 7" in results[0].title
+
+    def test_correct_model_passes(self):
+        """A Sealion 7 matching all filters must still be returned."""
+        import asyncio
+        scraper = self._scraper()
+        search  = self._search("BYD", "Sealion 7")
+        cards   = [self._card("2024 BYD Sealion 7 AWD 82kWh")]
+        results = asyncio.run(self._run_scrape_search(scraper, search, cards))
+        assert len(results) == 1
+
+    def test_model_filter_with_exclude_keyword(self):
+        """Model filter and exclude_keywords must both be applied independently."""
+        import asyncio
+        scraper = self._scraper()
+        # Enyaq search: exclude iV 60, only want iV 80
+        search = self._search("Skoda", "Enyaq", exclude=["enyaq 60", "iv 60"])
+        cards  = [
+            self._card("2022 Skoda Enyaq iV 60 58kWh"),    # excluded by keyword
+            self._card("2022 Skoda Enyaq iV 80 82kWh"),    # passes
+            self._card("2022 VW ID.4 Pro 77kWh"),          # wrong model (Enyaq absent)
+        ]
+        results = asyncio.run(self._run_scrape_search(scraper, search, cards))
+        titles = [r.title for r in results]
+        assert len(results) == 1, f"Expected 1 result (iV 80 only), got: {titles}"
+        assert "80" in results[0].title
+
+    def test_make_only_fallback_filters_by_make(self):
+        """When model is empty, filter by make name instead."""
+        import asyncio
+        scraper = self._scraper()
+        search  = self._search("BMW", "")
+        cards   = [
+            self._card("2023 BMW iX3 M Sport"),
+            self._card("2022 Mercedes EQC 400"),   # wrong make
+        ]
+        results = asyncio.run(self._run_scrape_search(scraper, search, cards))
+        titles = [r.title for r in results]
+        assert len(results) == 1, f"Expected only BMW, got: {titles}"
+        assert "BMW" in results[0].title

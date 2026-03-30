@@ -210,9 +210,11 @@ class CarGurusScraper:
 
     async def _scrape_search(self, context: BrowserContext, search: dict) -> list:
         listings = []
-        at_cfg   = search["autotrader"]   # reuse same config block
-        require  = [k.lower() for k in search.get("require_keywords", [])]
-        exclude  = [k.lower() for k in search.get("exclude_keywords", [])]
+        at_cfg         = search["autotrader"]   # reuse same config block
+        require        = [k.lower() for k in search.get("require_keywords", [])]
+        exclude        = [k.lower() for k in search.get("exclude_keywords", [])]
+        expected_make  = at_cfg.get("make", "").lower()
+        expected_model = at_cfg.get("model", "").lower()
         page_num = 1
 
         while len(listings) < self.max_per_search:
@@ -243,6 +245,18 @@ class CarGurusScraper:
                 listing = self._card_to_listing(card_data, search["name"])
                 if listing:
                     combined = f"{listing.title} {listing.spec_summary}".lower()
+                    # CarGurus often returns a broader set than requested (make-level
+                    # results when no model_id exists).  Reject cards that don't
+                    # match the expected model (or make when model is absent) —
+                    # mirrors the same guard already present in motors.py.
+                    if expected_model:
+                        if expected_model not in combined:
+                            logger.debug(f"  Skipping (wrong model): '{listing.title[:50]}'")
+                            continue
+                    elif expected_make:
+                        if expected_make not in combined:
+                            logger.debug(f"  Skipping (wrong make): '{listing.title[:50]}'")
+                            continue
                     if require and not all(k in combined for k in require):
                         continue
                     if any(k in combined for k in exclude):
