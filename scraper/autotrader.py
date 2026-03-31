@@ -476,7 +476,7 @@ class AutoTraderScraper:
         listing_id = id_match.group(1) if id_match else url.split("/")[-1]
 
         # ---------- JSON-LD (most stable — AutoTrader embeds schema.org data) ----------
-        price, year, mileage = None, None, None
+        price, year, mileage, ld_name = None, None, None, ""
         try:
             ld_scripts = await page.eval_on_selector_all(
                 'script[type="application/ld+json"]',
@@ -508,6 +508,10 @@ class AutoTraderScraper:
                                         mileage = candidate
                                 except (ValueError, TypeError):
                                     pass
+                        if not ld_name:
+                            raw_name = item.get('name') or item.get('description', '')
+                            if isinstance(raw_name, str) and 5 < len(raw_name) < 300:
+                                ld_name = raw_name
                 except Exception:
                     pass
         except Exception:
@@ -562,6 +566,12 @@ class AutoTraderScraper:
                 except Exception:
                     pass
 
+        # If the tab title is AutoTrader's current SEO format ("... for sale for £X")
+        # it contains no variant info. Prefer the JSON-LD name which always includes
+        # the full variant, e.g. "Skoda Enyaq iV 60 58kWh 132PS".
+        if ld_name and (not title or "for sale for" in title.lower()):
+            title = ld_name
+
         # ---------- Spec block ----------
         spec_summary = ""
         for sel in [
@@ -590,6 +600,11 @@ class AutoTraderScraper:
             filter_text = str(raw_ft or "")
         except Exception:
             pass
+        # Always append the JSON-LD name to filter_text — it's the most stable
+        # source of variant info (e.g. "iV 60 58kWh") since AutoTrader's tab
+        # title format and CSS selectors change and can omit variant details.
+        if ld_name:
+            filter_text = f"{filter_text} {ld_name}".strip()
 
         # ---------- Year, Mileage (from body text fallback) ----------
         try:
