@@ -136,6 +136,30 @@ def check_for_update(install_dir: str) -> dict | None:
     return None
 
 
+
+def post_to_lurch(export: dict, lurch_url: str = "http://192.168.194.148:8766") -> bool:
+    """
+    POST the scraper results JSON to Lurch's dashboard endpoint.
+    Returns True if Lurch accepted it, False on any failure.
+    Lurch will handle LLM filtering and Telegram notification.
+    Email is skipped if this returns True.
+    """
+    import httpx as _httpx
+    logger = logging.getLogger("main")
+    try:
+        resp = _httpx.post(
+            f"{lurch_url}/api/ev-results",
+            json=export,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        task_id = resp.json().get("task_id", "?")
+        logger.info(f"Results handed off to Lurch — task_id={task_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"Lurch handoff failed ({e}) — falling back to direct email")
+        return False
+
 def dedup_across_sources(listings: list) -> list:
     """
     Remove cross-source duplicates by matching on (year, price, mileage).
@@ -425,43 +449,51 @@ async def main():
         logger.error(msg, exc_info=True)
         run_errors.append(msg)
 
-    # --- Email ---
-    # Always send an email in production (not dry-run) so the operator
-    # always hears back from every run — even if all scrapers crashed.
+    # --- Notify: Lurch first, email fallback ---
+    # Try to hand off to Lurch (MediaCentre) for LLM filtering + Telegram summary.
+    # Fall back to direct email only if Lurch is unreachable.
     if args.dry_run:
-        logger.info(f"Dry run — email skipped ({len(unsent)} unsent listings queued)")
+        logger.info(f"Dry run — skipping Lurch handoff and email ({len(unsent)} unsent listings queued)")
     else:
-        if not unsent and not args.force_email and not run_errors:
-            logger.info("Nothing new — email skipped")
+        lurch_ok = post_to_lurch(export)
+        if lurch_ok:
+            # Lurch accepted — mark as sent so listings don't pile up
+            if unsent:
+                db.mark_as_sent([l["listing_id"] for l in unsent])
+                logger.info(f"Lurch accepted {len(unsent)} listing(s) — marked as sent")
         else:
-            try:
-                all_active = db.get_all_active()
-            except Exception as exc:
-                logger.warning(f"Could not fetch all_active for email (non-fatal): {exc}")
-                all_active = []
-            try:
-                update_info = check_for_update(str(Path(args.config).parent))
-            except Exception as exc:
-                logger.warning(f"Update check failed (non-fatal): {exc}")
-                update_info = None
-            max_email_listings = config.get("limits", {}).get("max_email_listings", 20)
-            logger.info(
-                f"Sending email: {len(new_listings)} new, {len(updated_listings)} price changes"
-                + (f", {len(run_errors)} error(s)" if run_errors else "")
-            )
-            ok = send_email(config, new_listings, updated_listings,
-                            all_active, stats, update_info=update_info,
-                            run_errors=run_errors if run_errors else None,
-                            max_email_listings=max_email_listings,
-                            json_path=json_path)
-            if ok:
-                if unsent:
-                    db.mark_as_sent([l["listing_id"] for l in unsent])
-                    logger.info(f"Email sent — {len(unsent)} listings marked as sent and data stripped")
-                else:
-                    logger.info("Email sent (errors-only or force)")
+            # Lurch down — fall back to direct email as before
+            if not unsent and not args.force_email and not run_errors:
+                logger.info("Nothing new and Lurch unavailable — email skipped")
             else:
-                logger.error("Email send FAILED — listings remain queued for next run")
+                try:
+                    all_active = db.get_all_active()
+                except Exception as exc:
+                    logger.warning(f"Could not fetch all_active for email (non-fatal): {exc}")
+                    all_active = []
+                try:
+                    update_info = check_for_update(str(Path(args.config).parent))
+                except Exception as exc:
+                    logger.warning(f"Update check failed (non-fatal): {exc}")
+                    update_info = None
+                max_email_listings = config.get("limits", {}).get("max_email_listings", 20)
+                logger.info(
+                    f"Sending fallback email: {len(new_listings)} new, {len(updated_listings)} price changes"
+                    + (f", {len(run_errors)} error(s)" if run_errors else "")
+                )
+                ok = send_email(config, new_listings, updated_listings,
+                                all_active, stats, update_info=update_info,
+                                run_errors=run_errors if run_errors else None,
+                                max_email_listings=max_email_listings,
+                                json_path=json_path)
+                if ok:
+                    if unsent:
+                        db.mark_as_sent([l["listing_id"] for l in unsent])
+                        logger.info(f"Fallback email sent — {len(unsent)} listings marked as sent")
+                    else:
+                        logger.info("Fallback email sent (errors-only or force)")
+                else:
+                    logger.error("Fallback email also FAILED — listings remain queued for next run")
 
     logger.info(f"Run complete at {datetime.now().isoformat()}")
     logger.info("=" * 60)
