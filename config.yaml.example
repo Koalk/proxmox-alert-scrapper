@@ -3,6 +3,13 @@
 # Edit this file to customise your searches and notifications
 # ============================================================
 
+# --- Agent Dashboard ---
+# URL of the MediaCentre agent's FastAPI dashboard.
+# When set, the scraper POSTs its results here after each run so the agent
+# can review listings and annotate the email.
+# Leave blank to disable agent review (scraper sends email directly as before).
+agent_dashboard_url: "http://192.168.194.148:8766"
+
 # --- Email Settings ---
 email:
   smtp_host: "smtp.gmail.com"        # or smtp.office365.com, your own server, etc.

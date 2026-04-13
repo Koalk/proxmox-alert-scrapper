@@ -34,8 +34,11 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def _car_card(listing: dict, badge: str = "") -> str:
-    """Render one car listing as an HTML card."""
+def _car_card(listing: dict, badge: str = "", ai_review: dict | None = None) -> str:
+    """Render one car listing as an HTML card.
+
+    ai_review: optional dict with keys 'action' ('approved'|'flagged') and 'reason' (str).
+    """
     images_html = ""
     for img_url in (listing.get("image_urls") or [])[:3]:
         images_html += (
@@ -77,6 +80,25 @@ def _car_card(listing: dict, badge: str = "") -> str:
             f'font-size:12px;font-weight:bold;">{badge}</span> '
         )
 
+    ai_badge_html = ""
+    if ai_review:
+        action = ai_review.get("action", "")
+        reason = ai_review.get("reason", "")
+        if action == "approved":
+            ai_badge_html = (
+                f'<div style="margin-top:8px;padding:6px 10px;'
+                f'background:#eaf7ec;border-left:3px solid #28a745;'
+                f'border-radius:4px;font-size:12px;color:#155724;">'
+                f'✅ <strong>AI Pick:</strong> {reason}</div>'
+            )
+        elif action == "flagged":
+            ai_badge_html = (
+                f'<div style="margin-top:8px;padding:6px 10px;'
+                f'background:#fff8e1;border-left:3px solid #ffc107;'
+                f'border-radius:4px;font-size:12px;color:#856404;">'
+                f'⚠️ <strong>AI Flag:</strong> {reason}</div>'
+            )
+
     seller_str = listing.get("seller_name", "") or listing.get("seller_type", "")
     spec = listing.get("spec_summary", "")[:120]
     source_labels = {
@@ -110,6 +132,7 @@ def _car_card(listing: dict, badge: str = "") -> str:
       {f'<div style="color:#777;font-size:12px;margin:4px 0;">Seller: {seller_str}</div>' if seller_str else ''}
       <div style="margin:8px 0;">{images_html}</div>
       <div style="margin-top:8px;">{flags_html}</div>
+      {ai_badge_html}
       <div style="margin-top:10px;">
         <a href="{listing['url']}"
            style="background:#1a4fa3;color:white;padding:8px 18px;
@@ -164,6 +187,28 @@ def _error_banner(errors: list[str]) -> str:
     """
 
 
+def _ai_summary_banner(annotations: dict) -> str:
+    """Render a compact AI review summary banner."""
+    approved = [v for v in annotations.values() if v.get("action") == "approved"]
+    flagged  = [v for v in annotations.values() if v.get("action") == "flagged"]
+    verdict  = annotations.get("_verdict", "")
+    parts = []
+    if approved:
+        parts.append(f"{len(approved)} recommended")
+    if flagged:
+        parts.append(f"{len(flagged)} flagged")
+    summary_line = " &bull; ".join(parts) if parts else "No listings reviewed"
+    verdict_html = f'<p style="margin:4px 0 0;font-size:13px;color:#555;">{verdict}</p>' if verdict else ""
+    return f"""
+    <div style="background:#f0f7ff;border:1px solid #b8d4f8;border-radius:8px;
+                padding:14px 18px;margin:20px 0;">
+      <strong style="color:#1a4fa3;">🤖 AI Review</strong>
+      <span style="font-size:13px;color:#555;margin-left:8px;">{summary_line}</span>
+      {verdict_html}
+    </div>
+    """
+
+
 def build_html_email(
     new_listings: list,
     updated_listings: list,
@@ -173,18 +218,31 @@ def build_html_email(
     update_info: dict | None = None,
     run_errors: list[str] | None = None,
     max_email_listings: int = 20,
+    annotations: dict | None = None,
 ) -> str:
-    """Build the full HTML email body."""
+    """Build the full HTML email body.
+
+    annotations: optional dict keyed by listing_id → {action, reason}.
+    A special '_verdict' key may hold the AI's overall verdict string.
+    Listings with action=='flagged' are sorted to the bottom of the email.
+    """
 
     # Combine new and price-changed, sort by price ascending (None/POA last)
+    ann = annotations or {}
+
+    def _ai(l):
+        return ann.get(l.get("listing_id")) or ann.get(str(l.get("listing_id")))
+
     all_unsent = sorted(
         new_listings + updated_listings,
         key=lambda l: (
+            # flagged listings sort last; approved first, then by price
+            (ann.get(l.get("listing_id"), {}).get("action") == "flagged"),
             (l.get("price") or 0) == 0,   # POA / None sorts last
             l.get("price") or 0,
         ),
     )
-    to_show      = all_unsent[:max_email_listings]
+    to_show       = all_unsent[:max_email_listings]
     total_omitted = len(all_unsent) - len(to_show)
 
     def _badge(l):
@@ -192,7 +250,7 @@ def build_html_email(
 
     listings_section = ""
     if to_show:
-        cards = "".join(_car_card(l, _badge(l)) for l in to_show)
+        cards = "".join(_car_card(l, _badge(l), ai_review=_ai(l)) for l in to_show)
         listings_section = f"""
         <h2 style="color:#155724;border-bottom:2px solid #28a745;padding-bottom:6px;">
           Listings ({len(all_unsent)})
@@ -271,6 +329,7 @@ def build_html_email(
       </table>
 
       {_error_banner(run_errors) if run_errors else ""}
+      {_ai_summary_banner(ann) if ann and any(k != '_verdict' for k in ann) else ""}
       {listings_section}
       {overflow_note}
 
@@ -298,6 +357,7 @@ def send_email(
     run_errors: list[str] | None = None,
     max_email_listings: int = 20,
     json_path: str | None = None,
+    annotations: dict | None = None,
 ) -> bool:
     """Send the digest email. Returns True on success."""
     email_cfg = config.get("email", {})
@@ -315,6 +375,7 @@ def send_email(
         update_info=update_info,
         run_errors=run_errors,
         max_email_listings=max_email_listings,
+        annotations=annotations,
     )
 
     # Use 'mixed' to support both HTML body and file attachment

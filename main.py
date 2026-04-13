@@ -22,12 +22,15 @@ KEY HELPERS:
 
 CLI:
   --dry-run       scrape + save, no email
+  --defer-email   scrape + save + push to agent dashboard, no email
   --quick         1 listing/search, no email (sanity check)
   --force-email   send even if nothing new
   --test-email    send immediately, no scraping
   --skip-motors   skip Motors.co.uk
   --reset-db      wipe the entire DB and exit (all history lost, next run is fresh)
   --mark-unsent   reset email_sent=0 on all rows so they re-appear in next email
+  --send-reviewed-email [URL|PATH]
+                  fetch review JSON from URL (GET) or file, send annotated email
   --config PATH   alternate config file
 """
 
@@ -136,30 +139,6 @@ def check_for_update(install_dir: str) -> dict | None:
     return None
 
 
-
-def post_to_lurch(export: dict, lurch_url: str = "http://192.168.194.148:8766") -> bool:
-    """
-    POST the scraper results JSON to Lurch's dashboard endpoint.
-    Returns True if Lurch accepted it, False on any failure.
-    Lurch will handle LLM filtering and Telegram notification.
-    Email is skipped if this returns True.
-    """
-    import httpx as _httpx
-    logger = logging.getLogger("main")
-    try:
-        resp = _httpx.post(
-            f"{lurch_url}/api/ev-results",
-            json=export,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        task_id = resp.json().get("task_id", "?")
-        logger.info(f"Results handed off to Lurch — task_id={task_id}")
-        return True
-    except Exception as e:
-        logger.warning(f"Lurch handoff failed ({e}) — falling back to direct email")
-        return False
-
 def dedup_across_sources(listings: list) -> list:
     """
     Remove cross-source duplicates by matching on (year, price, mileage).
@@ -202,6 +181,11 @@ async def main():
     parser = argparse.ArgumentParser(description="EV car alert scraper")
     parser.add_argument("--config",
         default=Path(__file__).parent / "config.yaml")
+    parser.add_argument("--defer-email", action="store_true",
+        help="Scrape and save but do not send email — write JSON for agent review")
+    parser.add_argument("--send-reviewed-email", metavar="PATH", nargs="?",
+        const="",   # sentinel: use default path
+        help="Send email using reviewed_results.json produced by the AI agent")
     parser.add_argument("--dry-run", action="store_true",
         help="Scrape and save but do not send email")
     parser.add_argument("--quick", action="store_true",
@@ -223,6 +207,91 @@ async def main():
     config = load_config(args.config)
 
     db_path = config.get("database", {}).get("path", "/opt/ev-scraper/data/listings.db")
+
+    # ── --send-reviewed-email mode ─────────────────────────────────────────
+    if args.send_reviewed_email is not None:
+        setup_logging(config.get("output", {}).get("log_path", "/opt/ev-scraper/logs/scraper.log"))
+        logger = logging.getLogger("main")
+        data_dir = Path(config.get("output", {}).get("json_path",
+                        "/opt/ev-scraper/data/latest_results.json")).parent
+
+        # Source can be a URL (fetched via GET) or a local file path
+        source = args.send_reviewed_email if args.send_reviewed_email else ""
+        review: dict = {}
+        if source.startswith("http://") or source.startswith("https://"):
+            import httpx as _httpx
+            logger.info(f"--send-reviewed-email: fetching review from {source}")
+            try:
+                r = _httpx.get(source, timeout=10)
+                if r.status_code == 404:
+                    logger.info("--send-reviewed-email: review not ready yet (404) — skipping")
+                    return
+                r.raise_for_status()
+                review = r.json()
+            except Exception as exc:
+                logger.error(f"--send-reviewed-email: failed to fetch review: {exc}")
+                sys.exit(1)
+        else:
+            review_path = Path(source) if source else data_dir / "reviewed_results.json"
+            if not review_path.exists():
+                logger.error(f"--send-reviewed-email: review file not found: {review_path}")
+                sys.exit(1)
+            with open(review_path) as f:
+                review = json.load(f)
+
+        # Build annotations dict {listing_id -> {action, reason}}
+        annotations: dict = {}
+        for entry in review.get("approved", []):
+            annotations[str(entry["listing_id"])] = {
+                "action": "approved",
+                "reason": entry.get("reason", ""),
+            }
+        for entry in review.get("flagged", []):
+            annotations[str(entry["listing_id"])] = {
+                "action": "flagged",
+                "reason": entry.get("reason", ""),
+            }
+        if review.get("verdict"):
+            annotations["_verdict"] = review["verdict"]
+
+        db          = ListingDatabase(db_path)
+        unsent      = db.get_unsent_listings()
+        new_listings     = [l for l in unsent if l.get("is_new")]
+        updated_listings = [l for l in unsent if not l.get("is_new")]
+        stats       = db.get_stats()
+        all_active  = db.get_all_active()
+        update_info = check_for_update(str(Path(args.config).parent))
+        max_email_listings = config.get("limits", {}).get("max_email_listings", 20)
+        json_path = config.get("output", {}).get("json_path")
+
+        n_approved = len(review.get("approved", []))
+        n_flagged  = len(review.get("flagged", []))
+        subject_override = (
+            f"{config.get('email', {}).get('subject_prefix', '\U0001f697 EV Alert')}: "
+            f"{n_approved} reviewed listing{'s' if n_approved != 1 else ''} "
+            f"(of {len(unsent)} total) — {datetime.now().strftime('%a %d %b')}"
+        )
+
+        logger.info(
+            f"Sending reviewed email: {n_approved} approved, {n_flagged} flagged, "
+            f"{len(unsent)} total unsent"
+        )
+        ok = send_email(
+            config, new_listings, updated_listings, all_active, stats,
+            subject_override=subject_override,
+            update_info=update_info,
+            max_email_listings=max_email_listings,
+            json_path=json_path,
+            annotations=annotations,
+        )
+        if ok:
+            db.mark_as_sent([l["listing_id"] for l in unsent])
+            logger.info(f"Reviewed email sent — {len(unsent)} listings marked as sent")
+            if not (source.startswith("http://") or source.startswith("https://")):
+                review_path.unlink(missing_ok=True)
+        else:
+            logger.error("Reviewed email send FAILED — listings remain queued")
+        return
 
     if args.reset_db:
         setup_logging(config.get("output", {}).get("log_path", "/opt/ev-scraper/logs/scraper.log"))
@@ -449,51 +518,62 @@ async def main():
         logger.error(msg, exc_info=True)
         run_errors.append(msg)
 
-    # --- Notify: Lurch first, email fallback ---
-    # Try to hand off to Lurch (MediaCentre) for LLM filtering + Telegram summary.
-    # Fall back to direct email only if Lurch is unreachable.
-    if args.dry_run:
-        logger.info(f"Dry run — skipping Lurch handoff and email ({len(unsent)} unsent listings queued)")
+    # --- Push results to agent dashboard (non-fatal) ---
+    # The dashboard saves the payload locally and enqueues an ev_filter task
+    # for the agent to review.  The agent writes reviewed_results.json which
+    # the ev-scraper-review timer later fetches via GET /api/ev-review.
+    agent_url = config.get("agent_dashboard_url", "")
+    if agent_url and (args.defer_email or args.dry_run is False):
+        push_url = agent_url.rstrip("/") + "/api/ev-results"
+        try:
+            import httpx as _httpx
+            logger.info(f"Pushing results to agent dashboard: {push_url}")
+            r = _httpx.post(push_url, json=export, timeout=10)
+            r.raise_for_status()
+            logger.info(f"Dashboard push OK — task_id: {r.json().get('task_id')}")
+        except Exception as exc:
+            logger.warning(f"Dashboard push failed (non-fatal): {exc}")
+
+    # --- Email ---
+    # Always send an email in production (not dry-run) so the operator
+    # always hears back from every run — even if all scrapers crashed.
+    if args.dry_run or args.defer_email:
+        logger.info(
+            f"{'Dry run' if args.dry_run else 'Defer-email mode'} — "
+            f"email skipped ({len(unsent)} unsent listings queued)"
+        )
     else:
-        lurch_ok = post_to_lurch(export)
-        if lurch_ok:
-            # Lurch accepted — mark as sent so listings don't pile up
-            if unsent:
-                db.mark_as_sent([l["listing_id"] for l in unsent])
-                logger.info(f"Lurch accepted {len(unsent)} listing(s) — marked as sent")
+        if not unsent and not args.force_email and not run_errors:
+            logger.info("Nothing new — email skipped")
         else:
-            # Lurch down — fall back to direct email as before
-            if not unsent and not args.force_email and not run_errors:
-                logger.info("Nothing new and Lurch unavailable — email skipped")
-            else:
-                try:
-                    all_active = db.get_all_active()
-                except Exception as exc:
-                    logger.warning(f"Could not fetch all_active for email (non-fatal): {exc}")
-                    all_active = []
-                try:
-                    update_info = check_for_update(str(Path(args.config).parent))
-                except Exception as exc:
-                    logger.warning(f"Update check failed (non-fatal): {exc}")
-                    update_info = None
-                max_email_listings = config.get("limits", {}).get("max_email_listings", 20)
-                logger.info(
-                    f"Sending fallback email: {len(new_listings)} new, {len(updated_listings)} price changes"
-                    + (f", {len(run_errors)} error(s)" if run_errors else "")
-                )
-                ok = send_email(config, new_listings, updated_listings,
-                                all_active, stats, update_info=update_info,
-                                run_errors=run_errors if run_errors else None,
-                                max_email_listings=max_email_listings,
-                                json_path=json_path)
-                if ok:
-                    if unsent:
-                        db.mark_as_sent([l["listing_id"] for l in unsent])
-                        logger.info(f"Fallback email sent — {len(unsent)} listings marked as sent")
-                    else:
-                        logger.info("Fallback email sent (errors-only or force)")
+            try:
+                all_active = db.get_all_active()
+            except Exception as exc:
+                logger.warning(f"Could not fetch all_active for email (non-fatal): {exc}")
+                all_active = []
+            try:
+                update_info = check_for_update(str(Path(args.config).parent))
+            except Exception as exc:
+                logger.warning(f"Update check failed (non-fatal): {exc}")
+                update_info = None
+            max_email_listings = config.get("limits", {}).get("max_email_listings", 20)
+            logger.info(
+                f"Sending email: {len(new_listings)} new, {len(updated_listings)} price changes"
+                + (f", {len(run_errors)} error(s)" if run_errors else "")
+            )
+            ok = send_email(config, new_listings, updated_listings,
+                            all_active, stats, update_info=update_info,
+                            run_errors=run_errors if run_errors else None,
+                            max_email_listings=max_email_listings,
+                            json_path=json_path)
+            if ok:
+                if unsent:
+                    db.mark_as_sent([l["listing_id"] for l in unsent])
+                    logger.info(f"Email sent — {len(unsent)} listings marked as sent and data stripped")
                 else:
-                    logger.error("Fallback email also FAILED — listings remain queued for next run")
+                    logger.info("Email sent (errors-only or force)")
+            else:
+                logger.error("Email send FAILED — listings remain queued for next run")
 
     logger.info(f"Run complete at {datetime.now().isoformat()}")
     logger.info("=" * 60)
