@@ -266,10 +266,12 @@ async def main():
 
         n_approved = len(review.get("approved", []))
         n_flagged  = len(review.get("flagged", []))
+        subject_prefix = config.get("email", {}).get("subject_prefix", "\U0001f697 EV Alert")
+        listing_word   = "listing" if n_approved == 1 else "listings"
         subject_override = (
-            f"{config.get('email', {}).get('subject_prefix', '\U0001f697 EV Alert')}: "
-            f"{n_approved} reviewed listing{'s' if n_approved != 1 else ''} "
-            f"(of {len(unsent)} total) — {datetime.now().strftime('%a %d %b')}"
+            f"{subject_prefix}: "
+            f"{n_approved} reviewed {listing_word} "
+            f"(of {len(unsent)} total) \u2014 {datetime.now().strftime('%a %d %b')}"
         )
 
         logger.info(
