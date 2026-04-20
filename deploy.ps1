@@ -1,21 +1,15 @@
 <#
 .SYNOPSIS
-    Push local ev-scraper code changes to the LXC and restart the timer.
+    Deploy gitignored config to the LXC, then git pull for all tracked code.
 
 .DESCRIPTION
-    Base64-encodes changed Python/config files and sends them directly to the
-    ev-scraper LXC via a single SSH connection.  Safe to re-run at any time —
-    never touches the database or config.yaml.
+    Deploys only gitignored files (config.yaml) via base64, then runs git pull
+    on the LXC to get the latest tracked code from GitHub.  Safe to re-run at
+    any time — never touches the database.
 
     What it deploys:
-      main.py
-      config.yaml
-      scraper/autotrader.py
-      scraper/motors.py
-      scraper/cargurus.py
-      scraper/database.py
-      scraper/emailer.py
-      healthcheck.py
+      config.yaml  (gitignored — written directly)
+      everything else via: git pull origin main
 
     After deploying it optionally runs --dry-run to verify the code works.
 
@@ -64,43 +58,34 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
 $Target   = "${SshUser}@${LxcHost}"
 
-# ── 1. Collect files to deploy ───────────────────────────────────────────────
-$FilesToDeploy = @(
-    @{ Local = "main.py";                Remote = "main.py" },
-    @{ Local = "config.yaml";            Remote = "config.yaml" },
-    @{ Local = "scraper\autotrader.py";  Remote = "scraper/autotrader.py" },
-    @{ Local = "scraper\motors.py";      Remote = "scraper/motors.py" },
-    @{ Local = "scraper\cargurus.py";    Remote = "scraper/cargurus.py" },
-    @{ Local = "scraper\database.py";    Remote = "scraper/database.py" },
-    @{ Local = "scraper\emailer.py";     Remote = "scraper/emailer.py" },
-    @{ Local = "healthcheck.py";         Remote = "healthcheck.py" },
-    @{ Local = "requirements.txt";       Remote = "requirements.txt" }
+# ── 1. Gitignored files to deploy directly (not in git) ──────────────────────
+$GitIgnoredFiles = @(
+    @{ Local = "config.yaml"; Remote = "config.yaml" }
 )
 
-foreach ($f in $FilesToDeploy) {
+foreach ($f in $GitIgnoredFiles) {
     $fullPath = Join-Path $RepoRoot $f.Local
     if (-not (Test-Path $fullPath)) {
         Write-Error "File not found: $fullPath"
     }
 }
 
-# ── 2. Base64-encode every file ──────────────────────────────────────────────
+# ── 2. Base64-encode gitignored files ────────────────────────────────────────
 function Get-B64([string]$Path) {
     [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path))
 }
 
-Write-Host "Encoding files ..."
+Write-Host "Encoding gitignored files ..."
 $encoded = @{}
-foreach ($f in $FilesToDeploy) {
+foreach ($f in $GitIgnoredFiles) {
     $encoded[$f.Remote] = Get-B64 (Join-Path $RepoRoot $f.Local)
     Write-Host "  $($f.Local)"
 }
 
 # ── 3. Build remote bash script ──────────────────────────────────────────────
-$writeLines = ($FilesToDeploy | ForEach-Object {
+$writeLines = ($GitIgnoredFiles | ForEach-Object {
     $remote = $_.Remote
     $b64    = $encoded[$remote]
-    # Heredoc avoids printf quoting issues with long base64 strings
     @"
 base64 -d > "${InstallDir}/${remote}" << 'B64EOF'
 $b64
@@ -183,13 +168,15 @@ PLAYWRIGHT_BROWSERS_PATH=$InstallDir/.playwright \
 $remoteScript = @"
 set -e
 
-echo 'Writing files to $InstallDir ...'
+echo 'Writing gitignored files to $InstallDir ...'
 $writeLines
 
-chown $ServiceUser`:$ServiceUser $InstallDir/scraper/*.py $InstallDir/main.py $InstallDir/config.yaml $InstallDir/healthcheck.py $InstallDir/requirements.txt 2>/dev/null || true
+chown $ServiceUser`:$ServiceUser $InstallDir/config.yaml 2>/dev/null || true
 
 echo 'Running git pull ...'
-cd $InstallDir && git pull || echo 'git pull failed (non-fatal — deployed files take precedence)'
+cd $InstallDir && git pull origin main
+
+chown $ServiceUser`:$ServiceUser $InstallDir/scraper/*.py $InstallDir/main.py $InstallDir/healthcheck.py $InstallDir/requirements.txt 2>/dev/null || true
 
 $pipLine
 
