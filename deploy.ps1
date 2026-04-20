@@ -173,8 +173,8 @@ $writeLines
 
 chown $ServiceUser`:$ServiceUser $InstallDir/config.yaml 2>/dev/null || true
 
-echo 'Running git pull ...'
-cd $InstallDir && git pull origin main
+echo 'Running git fetch + reset ...'
+cd $InstallDir && git fetch origin main && git reset --hard origin/main
 
 chown $ServiceUser`:$ServiceUser $InstallDir/scraper/*.py $InstallDir/main.py $InstallDir/healthcheck.py $InstallDir/requirements.txt 2>/dev/null || true
 
