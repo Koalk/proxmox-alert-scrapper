@@ -9,6 +9,7 @@
 
     What it deploys:
       main.py
+      config.yaml
       scraper/autotrader.py
       scraper/motors.py
       scraper/cargurus.py
@@ -66,6 +67,7 @@ $Target   = "${SshUser}@${LxcHost}"
 # ── 1. Collect files to deploy ───────────────────────────────────────────────
 $FilesToDeploy = @(
     @{ Local = "main.py";                Remote = "main.py" },
+    @{ Local = "config.yaml";            Remote = "config.yaml" },
     @{ Local = "scraper\autotrader.py";  Remote = "scraper/autotrader.py" },
     @{ Local = "scraper\motors.py";      Remote = "scraper/motors.py" },
     @{ Local = "scraper\cargurus.py";    Remote = "scraper/cargurus.py" },
@@ -184,7 +186,7 @@ set -e
 echo 'Writing files to $InstallDir ...'
 $writeLines
 
-chown $ServiceUser`:$ServiceUser $InstallDir/scraper/*.py $InstallDir/main.py $InstallDir/healthcheck.py $InstallDir/requirements.txt 2>/dev/null || true
+chown $ServiceUser`:$ServiceUser $InstallDir/scraper/*.py $InstallDir/main.py $InstallDir/config.yaml $InstallDir/healthcheck.py $InstallDir/requirements.txt 2>/dev/null || true
 
 $pipLine
 
