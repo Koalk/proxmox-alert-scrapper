@@ -40,7 +40,7 @@ import json
 import logging
 import subprocess
 import sys
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 from pathlib import Path
 
@@ -67,10 +67,11 @@ def setup_logging(log_path: str):
         level=logging.INFO,
         format=fmt,
         handlers=[
-            RotatingFileHandler(
+            TimedRotatingFileHandler(
                 log_path,
-                maxBytes=5 * 1024 * 1024,  # 5 MB per file
-                backupCount=3,             # keep .log + .log.1 + .log.2 + .log.3 = 20 MB max
+                when="midnight",
+                backupCount=7,             # keep today + last 7 days
+                encoding="utf-8",
             ),
             logging.StreamHandler(sys.stdout),
         ],
