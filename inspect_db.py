@@ -6,12 +6,17 @@ Uses Python's built-in sqlite3 module only.
 Usage:
     python3 inspect_db.py [db_path]
     python3 inspect_db.py [db_path] --purge "Kia EV6 (test)"
+    python3 inspect_db.py [db_path] --reset-unsent
 
 Default db_path: /opt/ev-scraper/data/listings.db
 
 Flags:
     --purge "Search Name"   Delete all listings for that search_name and exit.
                             Prints a preview and asks for confirmation first.
+    --reset-unsent          Mark ALL listings as unsent (email_sent=0, is_new=1)
+                            so they re-appear in the next email run. Use this to
+                            re-surface listings that were sent during a buggy run.
+                            Asks for confirmation first.
 """
 
 import sqlite3
@@ -20,12 +25,16 @@ from datetime import datetime, timezone, timedelta
 
 args = sys.argv[1:]
 purge_name = None
+reset_unsent = False
 db_args = []
 i = 0
 while i < len(args):
     if args[i] == "--purge" and i + 1 < len(args):
         purge_name = args[i + 1]
         i += 2
+    elif args[i] == "--reset-unsent":
+        reset_unsent = True
+        i += 1
     else:
         db_args.append(args[i])
         i += 1
@@ -79,6 +88,29 @@ if purge_name:
     conn.close()
     sys.exit(0)
 
+# ---------------------------------------------------------------------------
+# --reset-unsent mode
+# ---------------------------------------------------------------------------
+if reset_unsent:
+    conn = sqlite3.connect(DB_PATH)
+    cur2 = conn.cursor()
+    cur2.execute("SELECT COUNT(*) FROM listings WHERE title IS NOT NULL")
+    total_count = cur2.fetchone()[0]
+    cur2.execute("SELECT COUNT(*) FROM listings WHERE email_sent = 1 AND title IS NOT NULL")
+    sent_count = cur2.fetchone()[0]
+    print(f"\nThis will mark all {sent_count} previously-sent listings as unsent")
+    print(f"(out of {total_count} total). They will re-appear in the next email run.")
+    print(f"\nType YES to confirm: ", end="")
+    answer = input().strip()
+    if answer != "YES":
+        print("Aborted — nothing changed.")
+        conn.close()
+        sys.exit(0)
+    conn.execute("UPDATE listings SET email_sent = 0, is_new = 1 WHERE title IS NOT NULL")
+    conn.commit()
+    print(f"Done — {sent_count} listings reset to unsent.")
+    conn.close()
+    sys.exit(0)
 
 
 now = datetime.now(timezone.utc)
