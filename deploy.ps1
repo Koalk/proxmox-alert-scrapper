@@ -188,6 +188,9 @@ $writeLines
 
 chown $ServiceUser`:$ServiceUser $InstallDir/scraper/*.py $InstallDir/main.py $InstallDir/config.yaml $InstallDir/healthcheck.py $InstallDir/requirements.txt 2>/dev/null || true
 
+echo 'Running git pull ...'
+cd $InstallDir && git pull || echo 'git pull failed (non-fatal — deployed files take precedence)'
+
 $pipLine
 
 $cronLines

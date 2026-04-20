@@ -233,17 +233,31 @@ def build_html_email(
     def _ai(l):
         return ann.get(l.get("listing_id")) or ann.get(str(l.get("listing_id")))
 
-    all_unsent = sorted(
-        new_listings + updated_listings,
-        key=lambda l: (
-            # flagged listings sort last; approved first, then by price
-            (ann.get(l.get("listing_id"), {}).get("action") == "flagged"),
+    all_unsent = new_listings + updated_listings
+
+    def _sort_key(l):
+        return (
             (l.get("price") or 0) == 0,   # POA / None sorts last
             l.get("price") or 0,
-        ),
+        )
+
+    approved_listings = sorted(
+        [l for l in all_unsent if (ann.get(l.get("listing_id")) or ann.get(str(l.get("listing_id"))or"") or {}).get("action") == "approved"],
+        key=_sort_key,
     )
-    to_show       = all_unsent[:max_email_listings]
-    total_omitted = len(all_unsent) - len(to_show)
+    unreviewed_listings = sorted(
+        [l for l in all_unsent if not ann.get(l.get("listing_id")) and not ann.get(str(l.get("listing_id") or ""))],
+        key=_sort_key,
+    )
+    flagged_listings = [
+        l for l in all_unsent
+        if (ann.get(l.get("listing_id")) or ann.get(str(l.get("listing_id") or "")) or {}).get("action") == "flagged"
+    ]
+
+    # Approved first, then unreviewed; flagged excluded from main list
+    priority_listings = approved_listings + unreviewed_listings
+    to_show       = priority_listings[:max_email_listings]
+    total_omitted = len(priority_listings) - len(to_show)
 
     def _badge(l):
         return "🆕 New" if l.get("is_new") else "💲 Price Changed"
@@ -251,10 +265,15 @@ def build_html_email(
     listings_section = ""
     if to_show:
         cards = "".join(_car_card(l, _badge(l), ai_review=_ai(l)) for l in to_show)
+        flagged_note = (
+            f'<p style="color:#856404;font-size:12px;margin-top:8px;">'
+            f'⚠️ {len(flagged_listings)} listing(s) flagged by AI and hidden from this view.</p>'
+        ) if flagged_listings else ""
         listings_section = f"""
         <h2 style="color:#155724;border-bottom:2px solid #28a745;padding-bottom:6px;">
-          Listings ({len(all_unsent)})
+          Listings ({len(approved_listings)} ✅ approved · {len(unreviewed_listings)} unreviewed · {len(flagged_listings)} 🚩 hidden)
         </h2>
+        {flagged_note}
         {cards}
         """
     else:
