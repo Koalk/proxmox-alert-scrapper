@@ -189,8 +189,8 @@ def _error_banner(errors: list[str]) -> str:
 
 def _ai_summary_banner(annotations: dict) -> str:
     """Render a compact AI review summary banner."""
-    approved = [v for v in annotations.values() if v.get("action") == "approved"]
-    flagged  = [v for v in annotations.values() if v.get("action") == "flagged"]
+    approved = [v for v in annotations.values() if isinstance(v, dict) and v.get("action") == "approved"]
+    flagged  = [v for v in annotations.values() if isinstance(v, dict) and v.get("action") == "flagged"]
     verdict  = annotations.get("_verdict", "")
     parts = []
     if approved:
