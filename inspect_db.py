@@ -7,6 +7,7 @@ Usage:
     python3 inspect_db.py [db_path]
     python3 inspect_db.py [db_path] --purge "Kia EV6 (test)"
     python3 inspect_db.py [db_path] --reset-unsent
+    python3 inspect_db.py [db_path] --wipe
 
 Default db_path: /opt/ev-scraper/data/listings.db
 
@@ -14,8 +15,9 @@ Flags:
     --purge "Search Name"   Delete all listings for that search_name and exit.
                             Prints a preview and asks for confirmation first.
     --reset-unsent          Mark ALL listings as unsent (email_sent=0, is_new=1)
-                            so they re-appear in the next email run. Use this to
-                            re-surface listings that were sent during a buggy run.
+                            so they re-appear in the next email run.
+    --wipe                  Delete ALL data (listings + run_log + discarded).
+                            Use when starting fresh with a new search config.
                             Asks for confirmation first.
 """
 
@@ -26,6 +28,7 @@ from datetime import datetime, timezone, timedelta
 args = sys.argv[1:]
 purge_name = None
 reset_unsent = False
+wipe = False
 db_args = []
 i = 0
 while i < len(args):
@@ -34,6 +37,9 @@ while i < len(args):
         i += 2
     elif args[i] == "--reset-unsent":
         reset_unsent = True
+        i += 1
+    elif args[i] == "--wipe":
+        wipe = True
         i += 1
     else:
         db_args.append(args[i])
@@ -109,6 +115,39 @@ if reset_unsent:
     conn.execute("UPDATE listings SET email_sent = 0, is_new = 1 WHERE title IS NOT NULL")
     conn.commit()
     print(f"Done — {sent_count} listings reset to unsent.")
+    conn.close()
+    sys.exit(0)
+
+# ---------------------------------------------------------------------------
+# --wipe mode
+# ---------------------------------------------------------------------------
+if wipe:
+    conn = sqlite3.connect(DB_PATH)
+    cur2 = conn.cursor()
+    cur2.execute("SELECT COUNT(*) FROM listings")
+    total = cur2.fetchone()[0]
+    tables = [r[0] for r in cur2.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    print(f"\nThis will DELETE ALL DATA from the database:")
+    print(f"  {total} listing(s) in 'listings'")
+    print(f"  All rows in: {', '.join(t for t in tables if t != 'listings')}")
+    print(f"\nType YES to confirm complete wipe: ", end="")
+    answer = input().strip()
+    if answer != "YES":
+        print("Aborted — nothing deleted.")
+        conn.close()
+        sys.exit(0)
+    for table in tables:
+        conn.execute(f"DELETE FROM {table}")
+    conn.commit()
+    vacuum_conn = sqlite3.connect(DB_PATH)
+    try:
+        vacuum_conn.isolation_level = None
+        vacuum_conn.execute("VACUUM")
+    finally:
+        vacuum_conn.close()
+    print(f"Done — all data wiped. DB is now empty.")
     conn.close()
     sys.exit(0)
 
