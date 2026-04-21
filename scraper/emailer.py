@@ -33,6 +33,138 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Candidate reference info — shown as a collapsible spoiler on each card.
+# Keys are matched against listing search_name (case-insensitive substring).
+# ---------------------------------------------------------------------------
+_CANDIDATE_INFO: dict[str, dict] = {
+    "Skoda Enyaq iV 80": {
+        "status": "ACTIVE",
+        "blurb": "Primary pick. Biggest boot of the mid-size SUV set (585L), flat floor with rubber mat, strong Scottish supply.",
+        "gotcha": "Two HV battery recalls (93Q3 and 94R6) — confirm both closed at VIN level before buying, and check software is ME3.1 or later.",
+    },
+    "Tesla Model Y": {
+        "status": "ACTIVE",
+        "blurb": "The only car on this list that actually beats the Touran's boot (854L + 117L frunk). Supercharger network is a genuine advantage for Scotland.",
+        "gotcha": "The tailgate opening is saloon-shaped rather than a proper estate mouth — measure it against your dog crate before committing.",
+    },
+    "Hyundai Ioniq 5": {
+        "status": "ACTIVE",
+        "blurb": "Big battery only (77.4kWh). Good boot (527L) plus a useful 57L frunk for cables, and the sliding rear bench can reshape around a crate.",
+        "gotcha": "ICCU failure is a known issue across the Hyundai/Kia platform — confirm recall campaign 272 is closed at VIN level.",
+    },
+    "VW ID.4": {
+        "status": "ACTIVE",
+        "blurb": "Direct Enyaq cousin, 543L boot, strong supply.",
+        "gotcha": "Heat pump was a cost option and many used cars don't have it — check per listing, it matters for Scottish winters. Also confirm software recall 919A closed.",
+    },
+    "BMW iX3": {
+        "status": "ACTIVE",
+        "blurb": "Premium option, 510L boot with a low load lip and power tailgate — arguably the easiest of the set to load dogs into. Fewer recall headaches than the others.",
+        "gotcha": "Real-world range is only around 200–220 miles as it's a converted combustion platform. Make sure you're looking at the G08 generation (2021–2024), not the all-new Neue Klasse iX3 (late 2025+), which is a completely different £58k car.",
+    },
+    "Kia Niro EV": {
+        "status": "ACTIVE",
+        "blurb": "Second-gen (2022+) only. Square load bay, flat floor, 475L + 20L frunk, well-regarded by dog owners. Good value.",
+        "gotcha": "Heat pump was optional on early 2022 cars — verify per spec.",
+    },
+    "Kia EV6": {
+        "status": "ACTIVE",
+        "blurb": "Sporty and capable, but ranked last for dog-loading on this list — the tailgate opening is narrow, the load lip is high, and the boot shape is more saloon than SUV.",
+        "gotcha": "Same ICCU recall risk as the Ioniq 5 (campaigns SC327 and SA533A). Worth having on the list but view it last.",
+    },
+    "Renault Scenic": {
+        "status": "ACTIVE",
+        "blurb": "European Car of the Year 2024, 545L boot, heat pump standard, real-world range around 280 miles. Genuinely good car.",
+        "gotcha": "New enough that there's no long reliability track record yet — keep mileage tight (under 25k) to reduce risk on an unproven used example.",
+    },
+    "MG5": {
+        "status": "ACTIVE",
+        "blurb": "The only electric estate on the UK used market, and the best boot shape of the lot for dogs (proper estate mouth, low lip, 464–578L seats up). Very affordable.",
+        "gotcha": "MG finished bottom of the WhatCar 2025 reliability survey, so factor in the possibility of higher running costs.",
+    },
+    "Kia EV3": {
+        "status": "WATCH",
+        "blurb": "Sensible smaller SUV, but the Long Range (81.4kWh) is sitting at £26–28k today. Alert is set to £23k so it'll fire when the first examples drop into budget, likely late 2026.",
+        "gotcha": None,
+    },
+    "BYD Sealion 7": {
+        "status": "WATCH",
+        "blurb": "520L boot plus 58L frunk, good value on paper. UK has no Chinese EV tariffs (unlike the EU's 17% on BYD), so used prices are falling faster here. Floor is around £31k today — realistically £23k by late 2027.",
+        "gotcha": "BYD ranked 30th out of 31 brands in Driver Power 2025, so reliability is a real question mark. The 6-year/8-year warranty does a lot of work.",
+    },
+    "Citroen e-C3 Aircross": {
+        "status": "WATCH",
+        "blurb": "Launched late 2024, barely any used stock nationally. The 7-seat version is interesting as a Touran-ish replacement.",
+        "gotcha": "5-seat boot is only 460L and the third-row version drops to 330L behind it, so it's not actually that practical with all seats in use.",
+    },
+    "Citroen e-Berlingo": {
+        "status": "WATCH",
+        "blurb": "Probably the closest functional Touran replacement that exists today: sliding rear doors, 775L+ boot, available as a 7-seater.",
+        "gotcha": "The battery is only 50kWh, giving around 120 real-world miles — a dealbreaker for anything beyond Edinburgh city use. On watch in case a bigger-battery facelift arrives (rumoured for 2026–27).",
+    },
+    "Kia EV5": {
+        "status": "WATCH",
+        "blurb": "566L boot plus 44L frunk, genuinely practical. Floor is around £36k today. On watch to catch the first examples when they eventually drop to £23k, probably 2027–28.",
+        "gotcha": None,
+    },
+    "Skoda Epiq": {
+        "status": "WATCH",
+        "blurb": "Not on UK sale yet (deliveries expected Q1 2027). Revisit 2028–29 for used examples.",
+        "gotcha": None,
+    },
+    "Kia PV5": {
+        "status": "WATCH",
+        "blurb": "The true spiritual Touran successor: sliding doors, flat floor, 1,320L boot, even has a dedicated Dog Mode. First UK deliveries early 2026 at £30k+. Budget-realistic around 2028.",
+        "gotcha": None,
+    },
+}
+
+
+def _candidate_info_block(search_name: str) -> str:
+    """Return a collapsible <details> block with candidate notes for this model.
+
+    Matches by checking if any key from _CANDIDATE_INFO appears as a
+    case-insensitive substring of search_name.  Returns "" if no match.
+    """
+    search_lower = search_name.lower()
+    info = None
+    for key, val in _CANDIDATE_INFO.items():
+        if key.lower() in search_lower:
+            info = val
+            break
+    if info is None:
+        return ""
+
+    status_color = "#1a6b3a" if info["status"] == "ACTIVE" else "#7c5a00"
+    status_bg    = "#d4edda" if info["status"] == "ACTIVE" else "#fff3cd"
+    status_border= "#28a745" if info["status"] == "ACTIVE" else "#ffc107"
+
+    gotcha_html = (
+        f'<p style="margin:6px 0 0;font-size:12px;color:#7b3f00;">'
+        f'<strong>⚠️ Gotcha:</strong> {info["gotcha"]}</p>'
+    ) if info.get("gotcha") else ""
+
+    return f"""
+    <details style="margin-top:10px;">
+      <summary style="cursor:pointer;font-size:12px;color:#555;
+                      padding:4px 0;list-style:none;-webkit-appearance:none;">
+        <span style="text-decoration:underline;text-decoration-style:dotted;">
+          📋 About this model
+        </span>
+        &nbsp;<span style="background:{status_bg};border:1px solid {status_border};
+          color:{status_color};border-radius:8px;padding:1px 7px;
+          font-size:11px;font-weight:bold;">{info["status"]}</span>
+      </summary>
+      <div style="margin-top:8px;padding:10px 12px;background:#f8f9fa;
+                  border-left:3px solid {status_border};border-radius:0 6px 6px 0;
+                  font-size:12px;color:#444;">
+        <p style="margin:0 0 4px;">{info["blurb"]}</p>
+        {gotcha_html}
+      </div>
+    </details>
+    """
+
 
 def _car_card(listing: dict, badge: str = "", ai_review: dict | None = None) -> str:
     """Render one car listing as an HTML card.
@@ -133,6 +265,7 @@ def _car_card(listing: dict, badge: str = "", ai_review: dict | None = None) -> 
       <div style="margin:8px 0;">{images_html}</div>
       <div style="margin-top:8px;">{flags_html}</div>
       {ai_badge_html}
+      {_candidate_info_block(listing.get('search_name', ''))}
       <div style="margin-top:10px;">
         <a href="{listing['url']}"
            style="background:#1a4fa3;color:white;padding:8px 18px;
