@@ -45,6 +45,20 @@ _DEAL_RATINGS = {
     "no price":   "⚪ No Price Analysis",
 }
 
+# Match a full variant title: YEAR MAKE MODEL + at least one extra token (e.g. "E 80 (150PS)")
+_CG_VARIANT_RE = re.compile(r'^\d{4}\s+\w[\w\-\.]*(?:\s+\w[\w\-\.]*){3,}')
+
+
+def _extract_cargurus_spec(title: str) -> str:
+    """Return the card title as spec_summary when it contains variant info.
+    CarGurus often encodes the full variant in the card title
+    (e.g. '2022 Skoda Enyaq iV 80 E 80 (150PS)') — use it directly.
+    Returns '' when the title is too short to contain variant info."""
+    t = title.strip()
+    if _CG_VARIANT_RE.match(t) and '£' not in t:
+        return t
+    return ""
+
 # CarGurus numeric IDs for makes and specific EV models.
 # (config_make, config_model) -> (make_id, model_id)
 # model_id=None means make-only search filtered to electric via fuelTypes param.
@@ -513,7 +527,7 @@ class CarGurusScraper:
             distance_miles=distance_miles,
             seller_type="dealer",
             seller_name=city,
-            spec_summary="",
+            spec_summary=_extract_cargurus_spec(title),
             url=link or "https://www.cargurus.co.uk",
             source="cargurus",
             image_urls=[img] if img and len(img) > 20 else [],

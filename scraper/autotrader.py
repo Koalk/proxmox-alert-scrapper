@@ -55,6 +55,75 @@ _STEALTH_JS = """
 }
 """
 
+# --- Spec extraction: body-text fallback constants and helper ---
+
+# Known AutoTrader key-spec label words that appear as standalone lines in inner_text
+_AT_SPEC_LABELS = {
+    'mileage', 'registration', 'fuel type', 'range', 'body type', 'gearbox',
+    'doors', 'seats', 'body colour', 'engine size', 'battery range',
+    'battery size', 'drivetrain', 'variant', 'trim', 'emission class',
+}
+
+_AT_VARIANT_RE = re.compile(
+    r'\b(Long Range|Standard Range|iV\s*\d+|E\s*\d+X?|'
+    r'Pro(?:\s+Performance)?|GT.?Line|Air|Life|Style|Family|Max|'
+    r'AWD|RWD|4WD[E]?|Dual Motor|Single Motor|Auto\s+(?:RWD|AWD)|'
+    r'\d+\s*kWh|\d+\s*kW|\d+\s*(?:PS|bhp))\b',
+    re.IGNORECASE,
+)
+
+_AT_RELATED_RE = re.compile(
+    r'^\d{4}\s+[A-Z][a-z]+\s+\S+.*(?:for sale|£[\d,]+)|Save this listing',
+    re.IGNORECASE,
+)
+
+
+def _extract_autotrader_spec(lines: list) -> str:
+    """Extract a variant/spec summary from body inner_text lines.
+    Used as a fallback when CSS key-specs selectors return nothing."""
+    parts: dict = {}
+    # Variant subtitle: the line immediately after a 'YEAR MAKE...' heading line
+    for i, line in enumerate(lines[:40]):
+        if re.match(r'^\d{4}\s+[A-Z]', line) and i + 1 < len(lines):
+            candidate = lines[i + 1]
+            if _AT_VARIANT_RE.search(candidate) and '£' not in candidate:
+                parts['variant'] = candidate
+                break
+    # Label-pair spec block: scan for known label → value pairs
+    related_count = 0
+    i = 0
+    while i < len(lines) - 1:
+        line = lines[i]
+        norm = line.lower().strip()
+        if _AT_RELATED_RE.search(line):
+            related_count += 1
+            if related_count > 2:
+                break
+        if norm in _AT_SPEC_LABELS:
+            value = lines[i + 1].strip()
+            if (
+                value.lower().strip() not in _AT_SPEC_LABELS
+                and not _AT_RELATED_RE.search(value)
+                and len(value) < 80
+                and norm not in parts
+            ):
+                parts[norm] = value
+            i += 2
+            continue
+        i += 1
+    priority = [
+        'variant', 'battery range', 'battery size', 'range',
+        'drivetrain', 'fuel type', 'gearbox', 'mileage',
+    ]
+    out = []
+    seen: set = set()
+    for k in priority:
+        if k in parts and parts[k] not in seen:
+            out.append(f"{k.title()}: {parts[k]}")
+            seen.add(parts[k])
+    return ' | '.join(out)
+
+
 # Extracts variant/spec/description text from THIS listing's own content sections
 # for keyword filter evaluation.  Intentionally avoids the full page body to
 # prevent false-positive exclusions from "similar cars" recommendation carousels
@@ -478,7 +547,7 @@ class AutoTraderScraper:
         self, page: Page, url: str, search_name: str
     ) -> Optional[Listing]:
         await page.goto(url, timeout=self.timeout, wait_until="domcontentloaded")
-        await asyncio.sleep(_jitter(1.5))
+        await asyncio.sleep(_jitter(2.5))  # extra wait for dynamic spec content to render
 
         # Listing ID from URL
         id_match = re.search(r"/car-details/(\d+)", url)
@@ -620,6 +689,17 @@ class AutoTraderScraper:
             body = await page.inner_text("body", timeout=8000)
         except Exception:
             body = ""
+
+        # ---------- Spec block (body text fallback) ----------
+        # If CSS selectors failed, scan body inner_text for variant/spec lines.
+        if not spec_summary and body:
+            try:
+                body_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+                spec_summary = _extract_autotrader_spec(body_lines)
+                if spec_summary:
+                    logger.debug(f"  spec_summary from body text: {spec_summary[:80]}")
+            except Exception:
+                pass
 
         if year is None:
             try:
