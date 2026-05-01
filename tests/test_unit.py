@@ -939,6 +939,53 @@ class TestPassesFilters:
         assert s._passes_filters(self._listing(title=""), [], ["iv 60"]) is True
         assert s._passes_filters(self._listing(title="Ok"), [], []) is True
 
+    # require_one_of tests
+    def test_require_one_of_match_passes(self):
+        """At least one of the require_one_of terms present → passes."""
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq iV 80 82kWh 204PS")
+        assert s._passes_filters(listing, [], [], require_one_of=["82kwh", "150kw"]) is True
+
+    def test_require_one_of_no_match_rejected(self):
+        """None of the require_one_of terms present → rejected."""
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq 2022")
+        assert s._passes_filters(listing, [], [], require_one_of=["iv 80", "82kwh", "150kw"]) is False
+
+    def test_require_one_of_none_always_passes(self):
+        """require_one_of=None (default) means no constraint."""
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq 2022")
+        assert s._passes_filters(listing, [], [], require_one_of=None) is True
+
+    def test_require_one_of_empty_list_passes(self):
+        """Empty require_one_of list is treated as no constraint."""
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq 2022")
+        assert s._passes_filters(listing, [], [], require_one_of=[]) is True
+
+    def test_require_one_of_in_spec_summary(self):
+        """require_one_of matches against spec_summary, not just title."""
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq 2022", spec_summary="82kWh | RWD | iV 80")
+        assert s._passes_filters(listing, [], [], require_one_of=["82kwh"]) is True
+
+    def test_require_one_of_combined_with_exclude(self):
+        """require_one_of passes but exclude hits → rejected."""
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq iV 60 58kWh")
+        # has 58kwh (matches require_one_of) but also has iv 60 (excluded)
+        assert s._passes_filters(listing, [], ["iv 60"], require_one_of=["58kwh"]) is False
+
+    def test_require_one_of_with_require_keywords(self):
+        """require_keywords AND require_one_of must both be satisfied."""
+        s = self._scraper()
+        listing = self._listing(title="Skoda Enyaq iV 80 82kWh")
+        # require_keywords: enyaq present ✓; require_one_of: 82kwh present ✓
+        assert s._passes_filters(listing, ["enyaq"], [], require_one_of=["82kwh"]) is True
+        # require_keywords: ioniq 5 absent ✗
+        assert s._passes_filters(listing, ["ioniq 5"], [], require_one_of=["82kwh"]) is False
+
 
 # ---------------------------------------------------------------------------
 # CarGurus scraper — _card_to_listing (location / seller_name parsing)

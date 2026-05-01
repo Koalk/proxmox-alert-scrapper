@@ -187,8 +187,9 @@ class MotorsScraper:
     ) -> list[Listing]:
         listings: list[Listing] = []
         at_cfg  = search["autotrader"]
-        require = [k.lower() for k in search.get("require_keywords", [])]
-        exclude = [k.lower() for k in search.get("exclude_keywords", [])]
+        require     = [k.lower() for k in search.get("require_keywords", [])]
+        exclude     = [k.lower() for k in search.get("exclude_keywords", [])]
+        require_one = [k.lower() for k in search.get("require_one_of", [])]
 
         url  = build_motors_url(at_cfg, page_num=1)
         page = await context.new_page()
@@ -238,6 +239,8 @@ class MotorsScraper:
             if require and not all(k in combined for k in require):
                 continue
             if any(k in combined for k in exclude):
+                continue
+            if require_one and not any(k in combined for k in require_one):
                 continue
             listings.append(listing)
 

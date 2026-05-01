@@ -233,8 +233,9 @@ class AutoTraderScraper:
     ) -> list:
         listings = []
         at_cfg   = search["autotrader"]
-        require  = [k.lower() for k in search.get("require_keywords", [])]
-        exclude  = [k.lower() for k in search.get("exclude_keywords", [])]
+        require      = [k.lower() for k in search.get("require_keywords", [])]
+        exclude      = [k.lower() for k in search.get("exclude_keywords", [])]
+        require_one  = [k.lower() for k in search.get("require_one_of", [])]
         page_num = 1
         _id_re   = re.compile(r"/car-details/(\d+)")
 
@@ -317,7 +318,7 @@ class AutoTraderScraper:
                         result = await self._scrape_listing_with_retry(
                             detail, listing_url, search["name"]
                         )
-                        if result and self._passes_filters(result, require, exclude):
+                        if result and self._passes_filters(result, require, exclude, require_one_of=require_one):
                             price_str   = f"£{result.price:,}" if result.price else "£?"
                             mileage_str = f"{result.mileage:,}mi" if result.mileage else "?mi"
                             logger.info(
@@ -361,13 +362,21 @@ class AutoTraderScraper:
 
         return listings
 
-    def _passes_filters(self, listing: Listing, require: list, exclude: list) -> bool:
+    def _passes_filters(
+        self,
+        listing: "Listing",
+        require: list,
+        exclude: list,
+        require_one_of: list | None = None,
+    ) -> bool:
         # Include filter_text (extracted from the listing's own heading/description/spec
         # sections) so exclude_keywords work even when the browser tab title is generic.
         combined = f"{listing.title} {listing.spec_summary} {listing.filter_text}".lower()
         if require and not all(k in combined for k in require):
             return False
         if any(k in combined for k in exclude):
+            return False
+        if require_one_of and not any(k in combined for k in require_one_of):
             return False
         return True
 

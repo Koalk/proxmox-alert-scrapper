@@ -213,6 +213,7 @@ class CarGurusScraper:
         at_cfg         = search["autotrader"]   # reuse same config block
         require        = [k.lower() for k in search.get("require_keywords", [])]
         exclude        = [k.lower() for k in search.get("exclude_keywords", [])]
+        require_one    = [k.lower() for k in search.get("require_one_of", [])]
         expected_make  = at_cfg.get("make", "").lower()
         expected_model = at_cfg.get("model", "").lower()
         page_num = 1
@@ -260,6 +261,8 @@ class CarGurusScraper:
                     if require and not all(k in combined for k in require):
                         continue
                     if any(k in combined for k in exclude):
+                        continue
+                    if require_one and not any(k in combined for k in require_one):
                         continue
                     listings.append(listing)
                 await asyncio.sleep(_jitter(self.request_delay * 0.5))
