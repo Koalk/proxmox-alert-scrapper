@@ -1,7 +1,12 @@
 # EV Scraper — Coding Assistant Context
 # Repo: https://github.com/Koalk/proxmox-alert-scrapper
 
-## What this project is
+## ⚠️ DEPRECATED — June 2026
+Car purchased. Proxmox LXC (CT 300, `ev-scraper`, `192.168.194.91`) destroyed.
+All ev-scraper systemd units, watchdog checks, and dashboard endpoints removed from the agent network.
+This file is kept for historical reference.
+
+## What this project was
 
 Playwright-based headless Chromium scraper running nightly (2am) on a
 resource-constrained Proxmox LXC (512MB RAM, 1 core). Monitors AutoTrader UK

@@ -1,5 +1,9 @@
 # EV Car Alert Scraper 🚗
 
+> **⚠️ DEPRECATED — June 2026**
+> The car has been purchased. The Proxmox LXC (CT 300, `ev-scraper`, `192.168.194.91`) has been
+> decommissioned and destroyed. This repo is archived for reference only — no scraper is running.
+
 A resource-conscious Playwright-based scraper that monitors AutoTrader UK
 for used EV listings matching your criteria, emails you a rich HTML digest
 each morning, and saves a JSON file you can load into Claude for discussion.
